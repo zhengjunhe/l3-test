@@ -116,7 +116,6 @@ func transfer(cmd *cobra.Command, args []string) {
 	go func() {
 		for _, tx := range txs {
 			mSender.recvTxChan <- tx
-			//fmt.Println("+++++++++++post tx num:", i)
 		}
 	}()
 

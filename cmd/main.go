@@ -19,6 +19,7 @@ var (
 func init() {
 	rootCmd.AddCommand(
 		transferCmd(),
+		crossBurnCmd(),
 	)
 }
 
