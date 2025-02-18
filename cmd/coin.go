@@ -70,7 +70,6 @@ func transfer(cmd *cobra.Command, args []string) {
 		fmt.Println("Failed to connect to the Ethereum client with err:", err)
 		return
 	}
-	//nonce, err := client.PendingNonceAt(context.Background(), ethSender)
 
 	nonce, err := client.NonceAt(context.Background(), ethSender, nil)
 	if err != nil {
@@ -82,7 +81,7 @@ func transfer(cmd *cobra.Command, args []string) {
 	mSender.client = client
 	mSender.sender = ethSender
 	mSender.senderKey = masterpriv
-	mSender.nonde_start = nonce
+	mSender.nonce_start = nonce
 	mSender.recvTxChan = make(chan *types.Transaction, 50)
 
 	var privkeyArr []*ecdsa.PrivateKey
@@ -101,8 +100,7 @@ func transfer(cmd *cobra.Command, args []string) {
 			return
 		}
 		addr := crypto.PubkeyToAddress(*cpub)
-		//fmt.Println("genAddr:", addr, "genIndex", i)
-		tx := mSender.SignJuTx(addr, mSender.nonde_start+uint64(i), big.NewInt(1e10))
+		tx := mSender.SignJuTx(addr, mSender.nonce_start+uint64(i), big.NewInt(1e10))
 		txs = append(txs, tx)
 	}
 	fmt.Println("+++++++total signed txnum:", len(txs))
@@ -140,10 +138,7 @@ func transfer(cmd *cobra.Command, args []string) {
 
 	transferStatics := checkTxStatusOpt(txs, client)
 
-	//fmt.Println("transferStatics.SuccessCnt", transferStatics.SuccessCnt, transferStatics.Blocks)
-	//fmt.Println("transferStatics", transferStatics)
-
-	now := "./" + fmt.Sprintf("%d", time.Now().Unix())
+	now := "./transfer-" + fmt.Sprintf("%d", time.Now().Unix())
 	var transferStatics2DB TransferStatics2DB
 
 	transferStatics2DB.Name = "transferStatics"
@@ -209,17 +204,17 @@ func checkTxStatusOpt(txs2check []*types.Transaction, client *ethclient.Client) 
 
 	if txsPerGoroutime == 0 {
 		wg.Add(1)
-		go checkTxGroupStatusOpt(txsStatus, client, &wg, resChan)
+		go checkTxGroupStatusOpt(0, txsStatus, client, &wg, resChan)
 	} else {
 		for i := 0; i < numCPUs-1; i++ {
 			txs2txs2check := txsStatus[i*txsPerGoroutime : (i+1)*txsPerGoroutime]
 			wg.Add(1)
-			go checkTxGroupStatusOpt(txs2txs2check, client, &wg, resChan)
+			go checkTxGroupStatusOpt(i, txs2txs2check, client, &wg, resChan)
 		}
 
 		txs2txs2check := txsStatus[(numCPUs-1)*txsPerGoroutime:]
 		wg.Add(1)
-		go checkTxGroupStatusOpt(txs2txs2check, client, &wg, resChan)
+		go checkTxGroupStatusOpt(numCPUs-1, txs2txs2check, client, &wg, resChan)
 	}
 	wg.Wait()
 
@@ -260,7 +255,7 @@ type SingleTxStatus struct {
 	Status         int
 }
 
-func checkTxGroupStatusOpt(txs2check []*SingleTxStatus, client *ethclient.Client, wg *sync.WaitGroup, resChan chan *TransferStatics) {
+func checkTxGroupStatusOpt(processIndex int, txs2check []*SingleTxStatus, client *ethclient.Client, wg *sync.WaitGroup, resChan chan *TransferStatics) {
 	fmt.Println("checkTxGroupStatusOpt", "len(txs2check)", len(txs2check))
 	sleepCnt := 0
 	var transferStatics TransferStatics
@@ -304,7 +299,7 @@ func checkTxGroupStatusOpt(txs2check []*SingleTxStatus, client *ethclient.Client
 			}
 			atomic.AddInt32(&transferStatics.SuccessCnt, 1)
 
-			fmt.Println("checkTxGroupStatusOpt", transferStatics.SuccessCnt, transferStatics.FailedCnt, int32(len(txs2check)))
+			fmt.Println("checkTxGroupStatusOpt processIndex", processIndex, transferStatics.SuccessCnt, transferStatics.FailedCnt, int32(len(txs2check)))
 			if transferStatics.SuccessCnt+transferStatics.FailedCnt >= int32(len(txs2check)) {
 				fmt.Println("checkTxGroupStatusOpt", transferStatics.SuccessCnt, transferStatics.FailedCnt, int32(len(txs2check)))
 				resChan <- &transferStatics
@@ -355,7 +350,7 @@ type TransferStatics2DB struct {
 }
 
 type multiSender struct {
-	nonde_start uint64
+	nonce_start uint64
 	client      *ethclient.Client
 	sender      common.Address
 	senderKey   *ecdsa.PrivateKey

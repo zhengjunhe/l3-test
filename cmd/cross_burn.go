@@ -23,7 +23,6 @@ import (
 	"math/big"
 	"net/url"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -96,41 +95,62 @@ func burn(mnemonic, priv, registerAddr, token, rpcLaddr string, repeat, chainID 
 		fmt.Println("Approve failed:", err)
 		return
 	}
-	go waitBurnConfirm(nil)
-	var txHashes []string
 
+	var txHashes []string
 	for i := 0; i < repeat; i++ {
 		bkey, err := newKeyFromMasterKey(masterKey, TypeEther, bip32.FirstHardenedChild, 0, uint32(i))
 		if err != nil {
 			fmt.Println("Failed to newKeyFromMasterKey with err:", err)
 			return
 		}
-
 		cpub, err := crypto.DecompressPubkey(bkey.PublicKey().Key)
 		if err != nil {
 			panic(err)
 		}
-
-		hash, err := Burn(priv, token, crypto.PubkeyToAddress(*cpub).Hex(), x2EthDeployInfo.BridgeBank.Address, new(big.Int).SetInt64(int64(chainID)), ToWei(amount/float64(repeat), d), x2EthContracts.BridgeBank, client, rpcLaddr)
+		signedTx, err := SignBurn(priv, token, crypto.PubkeyToAddress(*cpub).Hex(), new(big.Int).SetInt64(int64(chainID)), ToWei(amount/float64(repeat), d),
+			x2EthContracts.BridgeBank, client, rpcLaddr)
 		if err != nil {
-			fmt.Println("ApproveAllowance err", err)
+			fmt.Println("Burn err", err)
 			return
 		}
-		fmt.Println("send tx to burn index:", i, "txhash", hash, "burn to:", crypto.PubkeyToAddress(*cpub).String())
-		txHashes = append(txHashes, hash)
+		waitBurnChan <- signedTx
+		txHashes = append(txHashes, signedTx.burnHash.Hex())
+		fmt.Println("signed tx to burn index:", i, "txhash", signedTx.burnHash, "burn to:", crypto.PubkeyToAddress(*cpub).String())
 	}
+
+	go sendBurnTx(10)
 
 	for {
-		fmt.Println("current burned num:", len(successBurn)+len(failedBurn))
-		if len(successBurn)+len(failedBurn) == len(txHashes) {
+		fmt.Println("wait  burned tx send current send num:", len(waitCheckTxStatus), "failednum:", len(failedBurn))
+		if len(waitCheckTxStatus)+len(failedBurn) == len(txHashes) {
 			close(waitBurnChan)
-			fmt.Println("burn successed  num:", len(successBurn), "burn failed num.", len(failedBurn))
-			return
+			break
 		}
 
-		time.Sleep(time.Millisecond * 400)
+		time.Sleep(time.Millisecond * 500)
 	}
-	return
+
+	transferStatics := checkTxStatusOpt(waitCheckTxStatus, client)
+	now := "./burn-" + fmt.Sprintf("%d", time.Now().Unix())
+	var transferStatics2DB TransferStatics2DB
+
+	transferStatics2DB.Name = "transferStatics"
+	transferStatics2DB.TxResult = make(map[string]TxStatus)
+	transferStatics2DB.Blocks = make(map[int64]bool)
+	for hash, val := range transferStatics.TxResult {
+		transferStatics2DB.TxResult[hash] = val
+	}
+
+	for block, val := range transferStatics.Blocks {
+		transferStatics2DB.Blocks[block] = val
+	}
+
+	transferStatics2DB.SuccessCnt = int(transferStatics.SuccessCnt)
+	transferStatics2DB.FailedCnt = int(transferStatics.FailedCnt)
+	transferStatics2DB.SendCnt = len(txHashes)
+
+	writeToFile(now, transferStatics2DB)
+
 }
 
 /*
@@ -152,13 +172,15 @@ type waitBurn struct {
 	burnHash     common.Hash
 	client       ethinterface.EthClientSpec
 	providerHttp string
-	isBurned     bool
+	isPeinding   bool
+	tx           *types.Transaction
 }
 
 var (
-	waitBurnChan = make(chan *waitBurn, 120)
-	successBurn  []*waitBurn
-	failedBurn   []*waitBurn
+	waitBurnChan = make(chan *waitBurn, 102400)
+
+	waitCheckTxStatus []*types.Transaction
+	failedBurn        []*types.Transaction
 )
 
 // GetDecimalsFromNode ...
@@ -387,29 +409,30 @@ func GetAddressFromBridgeRegistry(client ethinterface.EthClientSpec, sender, reg
 	}
 }
 
-func waitBurnConfirm(wg *sync.WaitGroup) {
+func sendBurnTx(processNum int) {
 
-	for {
-		waitBurn, ok := <-waitBurnChan
-		if ok {
-			//wg.Add(1)
-			go func() {
-				defer func() {
-					//wg.Done()
-				}()
-				err := waitEthTxFinished(waitBurn.client, waitBurn.burnHash, "Burn", waitBurn.providerHttp)
-				if nil != err {
-					log.Error("Burn::waitEthTxFinished", "err", err.Error())
-					failedBurn = append(failedBurn, waitBurn)
+	//批量10个协程
+	for i := 0; i < processNum; i++ {
+		go func() {
+			for {
+				waitBurn, ok := <-waitBurnChan
+				if ok {
+					err := waitBurn.client.SendTransaction(context.Background(), waitBurn.tx)
+					if nil != err {
+						log.Error("Burn::waitEthTxFinished", "err", err.Error())
+						failedBurn = append(failedBurn, waitBurn.tx)
+						return
+					}
+
+					waitCheckTxStatus = append(waitCheckTxStatus, waitBurn.tx)
+				} else {
+					fmt.Println("channel return")
 					return
 				}
-				waitBurn.isBurned = true
-				successBurn = append(successBurn, waitBurn)
-			}()
-		} else {
-			return
-		}
+			}
+		}()
 	}
+
 }
 
 func Approve(ownerPrivateKeyStr, tokenAddrstr string, bridgeBank common.Address, amount *big.Int,
@@ -460,13 +483,13 @@ func Approve(ownerPrivateKeyStr, tokenAddrstr string, bridgeBank common.Address,
 }
 
 // Burn ...
-func Burn(ownerPrivateKeyStr, tokenAddrstr, receiver string, bridgeBank common.Address, chainID2wd, amount *big.Int,
-	bridgeBankIns *generated.BridgeBank, client ethinterface.EthClientSpec, providerHttp string) (string, error) {
+func SignBurn(ownerPrivateKeyStr, tokenAddrstr, receiver string, chainID2wd, amount *big.Int,
+	bridgeBankIns *generated.BridgeBank, client ethinterface.EthClientSpec, providerHttp string) (*waitBurn, error) {
 	log.Info("auxiliary::Burn", "tokenAddrstr", tokenAddrstr, "btcReceiver", receiver, "amount", amount.String(), "ownerPrivateKeyStr", ownerPrivateKeyStr)
 
 	ownerPrivateKey, err := crypto.ToECDSA(common.FromHex(ownerPrivateKeyStr))
 	if nil != err {
-		return "", err
+		return nil, err
 	}
 	ownerAddr := crypto.PubkeyToAddress(ownerPrivateKey.PublicKey)
 	var prepareDone bool
@@ -488,7 +511,7 @@ func Burn(ownerPrivateKeyStr, tokenAddrstr, receiver string, bridgeBank common.A
 	bridgeServiceFee, err := bridgeBankIns.BridgeServiceFee(opts)
 	if nil != err {
 		log.Error("LockEthErc20Asset", "Get BridgeServiceFee err", err.Error())
-		return "", err
+		return nil, err
 	}
 
 	prepareDone = false
@@ -496,32 +519,26 @@ func Burn(ownerPrivateKeyStr, tokenAddrstr, receiver string, bridgeBank common.A
 	auth, err := PrepareAuth(client, ownerPrivateKey, ownerAddr)
 	if nil != err {
 		log.Error("Burn::PrepareAuth", "err", err.Error())
-		return "", err
+		return nil, err
 	}
 	auth.Value.SetInt64(bridgeServiceFee.Int64())
 	prepareDone = true
-
+	auth.NoSend = true
 	tx, err := bridgeBankIns.BurnBridgeTokens(auth, chainID2wd, common.HexToAddress(receiver), tokenAddr, amount)
 	if nil != err {
 		log.Error("Burn::BurnBridgeTokens", "err", err.Error())
-		return "", err
+		return nil, err
 	}
 
-	waitBurnChan <- &waitBurn{
+	return &waitBurn{
 		to:           receiver,
 		amount:       amount,
 		burnHash:     tx.Hash(),
 		providerHttp: providerHttp,
 		client:       client,
-	}
-	return "", nil
-	//err = waitEthTxFinished(client, tx.Hash(), "Burn", providerHttp)
-	//if nil != err {
-	//	log.Error("Burn::waitEthTxFinished", "err", err.Error())
-	//	return "", err
-	//}
-	//
-	//return tx.Hash().String(), nil
+		tx:           tx,
+	}, nil
+
 }
 
 func revokeNonce4MultiEth(sender common.Address, addr2TxNonce map[common.Address]*NonceMutex) (*big.Int, error) {
