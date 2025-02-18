@@ -138,35 +138,7 @@ func transfer(cmd *cobra.Command, args []string) {
 
 	//blockOccupided := make(map[int64]bool)
 
-	fmt.Println("Going to check tx status")
-	// check tx process
-	numCPUs := runtime.NumCPU()
-	txCnt := len(txs)
-	txsPerGoroutime := txCnt / numCPUs
-
-	var transferStatics TransferStatics
-	transferStatics.TxResult = make(map[string]TxStatus)
-	transferStatics.Blocks = make(map[int64]bool)
-
-	checkTxProcessed(txs, client)
-
-	var wg sync.WaitGroup
-
-	if txsPerGoroutime == 0 {
-		wg.Add(1)
-		go checkTxStatus(txs, client, &transferStatics, &wg)
-	} else {
-		for i := 0; i < numCPUs-1; i++ {
-			wg.Add(1)
-			txs2txs2check := txs[i*txsPerGoroutime : (i+1)*txsPerGoroutime]
-			go checkTxStatus(txs2txs2check, client, &transferStatics, &wg)
-		}
-
-		wg.Add(1)
-		txs2txs2check := txs[(numCPUs-1)*txsPerGoroutime:]
-		go checkTxStatus(txs2txs2check, client, &transferStatics, &wg)
-	}
-	wg.Wait()
+	transferStatics := checkTxStatusOpt(txs, client)
 
 	//fmt.Println("transferStatics.SuccessCnt", transferStatics.SuccessCnt, transferStatics.Blocks)
 	//fmt.Println("transferStatics", transferStatics)
@@ -216,53 +188,137 @@ func checkTxProcessed(txs2check []*types.Transaction, client *ethclient.Client) 
 
 }
 
-func checkTxStatus(txs2check []*types.Transaction, client *ethclient.Client, transferStatics *TransferStatics, wg *sync.WaitGroup) {
-	defer wg.Done()
+func checkTxStatusOpt(txs2check []*types.Transaction, client *ethclient.Client) TransferStatics {
+	numCPUs := runtime.NumCPU()
+	txCnt := len(txs2check)
+	txsPerGoroutime := txCnt / numCPUs
+	fmt.Println("runtime.NumCPU()", numCPUs, "txsPerGoroutime", txsPerGoroutime)
+
+	var txsStatus []*SingleTxStatus
+	for i := range txs2check {
+		txsStatus = append(txsStatus, &SingleTxStatus{
+			TxHash:         txs2check[i].Hash(),
+			CheckedAlready: false,
+		})
+	}
+
+	var wg sync.WaitGroup
+	resChan := make(chan *TransferStatics, 100)
+
+	fmt.Println("Going to check tx status")
+
+	if txsPerGoroutime == 0 {
+		wg.Add(1)
+		go checkTxGroupStatusOpt(txsStatus, client, &wg, resChan)
+	} else {
+		for i := 0; i < numCPUs-1; i++ {
+			txs2txs2check := txsStatus[i*txsPerGoroutime : (i+1)*txsPerGoroutime]
+			wg.Add(1)
+			go checkTxGroupStatusOpt(txs2txs2check, client, &wg, resChan)
+		}
+
+		txs2txs2check := txsStatus[(numCPUs-1)*txsPerGoroutime:]
+		wg.Add(1)
+		go checkTxGroupStatusOpt(txs2txs2check, client, &wg, resChan)
+	}
+	wg.Wait()
+
+	var transferStatics TransferStatics
+	transferStatics.TxResult = make(map[string]TxStatus)
+	transferStatics.Blocks = make(map[int64]bool)
+	fmt.Println("finish all the tx receipt check,and going to do sum statics")
+
+	wg.Add(1)
+	go func() {
+		for {
+			select {
+			case onetransferStatics := <-resChan:
+				transferStatics.FailedCnt += onetransferStatics.FailedCnt
+				transferStatics.SuccessCnt += onetransferStatics.SuccessCnt
+				for hash, s := range onetransferStatics.TxResult {
+					transferStatics.TxResult[hash] = s
+				}
+				for block, b := range onetransferStatics.Blocks {
+					transferStatics.Blocks[block] = b
+				}
+				fmt.Println("len(resChan)", len(resChan))
+				if len(resChan) == 0 {
+					defer wg.Done()
+					return
+				}
+			}
+		}
+	}()
+	wg.Wait()
+
+	return transferStatics
+}
+
+type SingleTxStatus struct {
+	TxHash         common.Hash
+	CheckedAlready bool
+	Status         int
+}
+
+func checkTxGroupStatusOpt(txs2check []*SingleTxStatus, client *ethclient.Client, wg *sync.WaitGroup, resChan chan *TransferStatics) {
+	fmt.Println("checkTxGroupStatusOpt", "len(txs2check)", len(txs2check))
 	sleepCnt := 0
-	for _, tx := range txs2check {
-		receipt, err := client.TransactionReceipt(context.Background(), tx.Hash())
-		if err == ethereum.NotFound {
-			fmt.Println("Not find tx with hash", tx.Hash().String())
-			transferStatics.RWLock.Lock()
-			transferStatics.TxResult[tx.Hash().String()] = TxStatus{
-				ErrorInfo: err.Error(),
+	var transferStatics TransferStatics
+	transferStatics.TxResult = make(map[string]TxStatus)
+	transferStatics.Blocks = make(map[int64]bool)
+	start := time.Now()
+	for {
+		for _, tx := range txs2check {
+			if tx.CheckedAlready == true {
+				continue
 			}
-			transferStatics.RWLock.Unlock()
-			time.Sleep(time.Second)
-			sleepCnt++
-			continue
-		} else if err != nil {
-			transferStatics.RWLock.Lock()
-			transferStatics.TxResult[tx.Hash().String()] = TxStatus{
-				ErrorInfo: err.Error(),
+			receipt, err := client.TransactionReceipt(context.Background(), tx.TxHash)
+			if err == ethereum.NotFound {
+				fmt.Println("Not find tx with hash", tx.TxHash.String(), "going to sleep 1 sec")
+				time.Sleep(time.Second)
+				sleepCnt++
+				continue
+			} else if err != nil {
+				tx.CheckedAlready = true
+				atomic.AddInt32(&transferStatics.FailedCnt, 1)
+				continue
 			}
-			transferStatics.RWLock.Unlock()
-			fmt.Println("tx with error", err.Error())
-			atomic.AddInt32(&transferStatics.FailedCnt, 1)
-			continue
-		}
 
-		if receipt.Status != types.ReceiptStatusSuccessful {
-			transferStatics.RWLock.Lock()
+			tx.CheckedAlready = true
+
 			transferStatics.Blocks[receipt.BlockNumber.Int64()] = true
-			transferStatics.TxResult[tx.Hash().String()] = TxStatus{
-				Block:  receipt.BlockNumber.Int64(),
-				Status: int(types.ReceiptStatusFailed),
-			}
-			transferStatics.RWLock.Unlock()
-			atomic.AddInt32(&transferStatics.FailedCnt, 1)
-			fmt.Println("tx failed with statue", receipt.Status)
-			continue
-		}
 
-		transferStatics.RWLock.Lock()
-		transferStatics.Blocks[receipt.BlockNumber.Int64()] = true
-		transferStatics.TxResult[tx.Hash().String()] = TxStatus{
-			Block:  receipt.BlockNumber.Int64(),
-			Status: int(types.ReceiptStatusSuccessful),
+			if receipt.Status != types.ReceiptStatusSuccessful {
+				transferStatics.TxResult[tx.TxHash.String()] = TxStatus{
+					Block:  receipt.BlockNumber.Int64(),
+					Status: int(types.ReceiptStatusFailed),
+				}
+				atomic.AddInt32(&transferStatics.FailedCnt, 1)
+				fmt.Println("tx failed with statue", receipt.Status)
+				continue
+			}
+
+			transferStatics.TxResult[tx.TxHash.String()] = TxStatus{
+				Block:  receipt.BlockNumber.Int64(),
+				Status: int(types.ReceiptStatusSuccessful),
+			}
+			atomic.AddInt32(&transferStatics.SuccessCnt, 1)
+
+			fmt.Println("checkTxGroupStatusOpt", transferStatics.SuccessCnt, transferStatics.FailedCnt, int32(len(txs2check)))
+			if transferStatics.SuccessCnt+transferStatics.FailedCnt >= int32(len(txs2check)) {
+				fmt.Println("checkTxGroupStatusOpt", transferStatics.SuccessCnt, transferStatics.FailedCnt, int32(len(txs2check)))
+				resChan <- &transferStatics
+				wg.Done()
+				return
+			}
+
+			if time.Since(start).Seconds() > float64(10) {
+				fmt.Println("time.Since(start).Seconds()", time.Since(start).Seconds(), "checkTxGroupStatusOpt", transferStatics.SuccessCnt, transferStatics.FailedCnt, int32(len(txs2check)))
+				resChan <- &transferStatics
+				wg.Done()
+				return
+			}
 		}
-		transferStatics.RWLock.Unlock()
-		atomic.AddInt32(&transferStatics.SuccessCnt, 1)
 	}
 }
 
@@ -274,8 +330,16 @@ type TxStatus struct {
 
 type TransferStatics struct {
 	Name       string
-	RWLock     sync.RWMutex
 	TxResult   map[string]TxStatus
+	Blocks     map[int64]bool
+	SuccessCnt int32
+	FailedCnt  int32
+}
+
+type TxStatusStatics struct {
+	Name       string
+	RWLock     sync.RWMutex
+	Tx2check   map[common.Hash]bool
 	Blocks     map[int64]bool
 	SuccessCnt int32
 	FailedCnt  int32
