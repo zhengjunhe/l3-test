@@ -96,7 +96,7 @@ func burn(mnemonic, priv, registerAddr, token, rpcLaddr string, repeat, chainID 
 		fmt.Println("Approve failed:", err)
 		return
 	}
-	go waitBurnConform(nil)
+	go waitBurnConfirm(nil)
 	var txHashes []string
 
 	for i := 0; i < repeat; i++ {
@@ -387,7 +387,7 @@ func GetAddressFromBridgeRegistry(client ethinterface.EthClientSpec, sender, reg
 	}
 }
 
-func waitBurnConform(wg *sync.WaitGroup) {
+func waitBurnConfirm(wg *sync.WaitGroup) {
 
 	for {
 		waitBurn, ok := <-waitBurnChan
