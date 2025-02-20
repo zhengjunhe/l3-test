@@ -61,8 +61,8 @@ func transfer(cmd *cobra.Command, args []string) {
 	ethSender2 := crypto.PubkeyToAddress(*dpub)
 	fmt.Println("master ethSender:", ethSender.String())
 	fmt.Println("master ethSender:", ethSender2.String())
-
-	fmt.Println("masterPriv:", hex.EncodeToString(masterKey.Key))
+	masterPrivHex := hex.EncodeToString(masterKey.Key)
+	fmt.Println("masterPriv:", masterPrivHex)
 
 	//开始批量构造交易
 	client, err := ethclient.Dial(rpcLaddr)
@@ -101,6 +101,7 @@ func transfer(cmd *cobra.Command, args []string) {
 		}
 		addr := crypto.PubkeyToAddress(*cpub)
 		tx := mSender.SignJuTx(addr, mSender.nonce_start+uint64(i), big.NewInt(1e10))
+
 		txs = append(txs, tx)
 	}
 	fmt.Println("+++++++total signed txnum:", len(txs))
@@ -404,9 +405,9 @@ func (m *multiSender) SignJuTx(to common.Address, nonce uint64, amount *big.Int)
 			log.Fatalf("Failed to suggest gas price: %v", err)
 		}
 	}
-
+	fmt.Println("gasprice:", gasPrice)
 	// 5. 创建交易
-	tx := types.NewTransaction(nonce, to, amount, gasLimit, gasPrice, nil)
+	tx := types.NewTransaction(nonce, to, amount, gasLimit, big.NewInt(gasPrice.Int64()*4), nil)
 	// 6. 使用私钥签名交易
 
 	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(big.NewInt(chainID)), m.senderKey)

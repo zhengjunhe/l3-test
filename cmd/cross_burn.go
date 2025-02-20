@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -45,7 +46,8 @@ func addBurnFlags(cmd *cobra.Command) {
 	cmd.Flags().StringP("token", "t", "", "token contract address")
 	cmd.Flags().StringP("registerAddr", "c", "", "registerAddr contract address")
 	cmd.Flags().StringP("key", "k", "", "sender private key ")
-
+	cmd.Flags().BoolP("coins", "j", false, "test transfer and cross burn at the same time")
+	cmd.Flags().IntP("coinsRepeat", "s", 0, "transfer repeat number")
 	_ = cmd.MarkFlagRequired("amount")
 	_ = cmd.MarkFlagRequired("chainID")
 	_ = cmd.MarkFlagRequired("registerAddr")
@@ -61,6 +63,7 @@ func burnToken(cmd *cobra.Command, args []string) {
 	amount, _ := cmd.Flags().GetFloat64("amount")
 	token, _ := cmd.Flags().GetString("token")
 	registerAddr, _ := cmd.Flags().GetString("registerAddr")
+	coinsRepeat, _ := cmd.Flags().GetInt("coinsRepeat")
 	chainID, err := cmd.Flags().GetInt("chainID")
 	if err != nil {
 		panic(err)
@@ -70,64 +73,150 @@ func burnToken(cmd *cobra.Command, args []string) {
 		panic(err)
 	}
 	mnemonic, _ := cmd.Flags().GetString("mnemonic")
-	burn(mnemonic, key, registerAddr, token, rpcLaddr, repeat, chainID, amount)
+	sendCoins, _ := cmd.Flags().GetBool("coins")
+
+	burn(mnemonic, key, registerAddr, token, rpcLaddr, repeat, coinsRepeat, int64(chainID), amount, sendCoins)
 }
 
-func burn(mnemonic, priv, registerAddr, token, rpcLaddr string, repeat, chainID int, amount float64) {
+func burn(mnemonic, priv, registerAddr, token, rpcLaddr string, burnRepeat, coinsRepeat int, chainID int64, amount float64, sendCoins bool) {
 	seed, err := bip39.NewSeedWithErrorChecking(mnemonic, "")
 	if err != nil {
 		fmt.Println("NewSeedWithErrorChecking with error:", err.Error())
 		return
 	}
+	fmt.Println("+++++++++++++++++++++++1")
 	masterKey, err := bip32.NewMasterKey(seed)
 	d, err := GetDecimalsFromNode(token, rpcLaddr)
 	if err != nil {
 		fmt.Println("get decimals err")
 		return
 	}
+	fmt.Println("+++++++++++++++++++++++2")
 	client, x2EthContracts, x2EthDeployInfo, err := RecoverContractHandler4Dstju(registerAddr, rpcLaddr)
 	if err != nil {
 		fmt.Println("RecoverContractHandler err:", err)
 		return
 	}
-	_, err = Approve(priv, token, x2EthDeployInfo.BridgeBank.Address, ToWei(amount, d), client, rpcLaddr)
+	fmt.Println("+++++++++++++++++++++++3")
+	burnKey, err := crypto.ToECDSA(common.FromHex(priv))
 	if err != nil {
-		fmt.Println("Approve failed:", err)
-		return
+		panic(err)
 	}
 
+	coinsKey, err := crypto.ToECDSA(masterKey.Key)
+	if err != nil {
+		panic(err)
+	}
+	var txHashMutex sync.Mutex
 	var txHashes []string
+	var mSender multiSender
+	mSender.sender = crypto.PubkeyToAddress(coinsKey.PublicKey)
+	mSender.nonce_start, _ = client.NonceAt(context.Background(), crypto.PubkeyToAddress(coinsKey.PublicKey), nil)
+	mSender.senderKey = coinsKey
+	mSender.client, err = ethclient.Dial(rpcLaddr)
+	if err != nil {
+		panic(err)
+	}
+	burnSenderNonce, _ := client.NonceAt(context.Background(), crypto.PubkeyToAddress(burnKey.PublicKey), nil)
+	fmt.Println("burn  sender:", crypto.PubkeyToAddress(burnKey.PublicKey), "nonce:", burnSenderNonce)
+	fmt.Println("coins  sender:", crypto.PubkeyToAddress(coinsKey.PublicKey), "nonce:", mSender.nonce_start)
+	var wg sync.WaitGroup
+	var repeat = burnRepeat
+	if repeat < coinsRepeat {
+		repeat = coinsRepeat
+	}
+	var bSender *burnSender
+	if burnRepeat != 0 {
+		bSender = &burnSender{
+			client:         client,
+			senderKey:      burnKey,
+			sender:         crypto.PubkeyToAddress(burnKey.PublicKey),
+			bridgeBankIns:  x2EthContracts.BridgeBank,
+			bridgeBankAddr: x2EthDeployInfo.BridgeBank.Address,
+			tokenAddr:      common.HexToAddress(token),
+			amount:         ToWei(amount/float64(burnRepeat), d),
+			chainID2wd:     big.NewInt(chainID),
+		}
+		addr2NonceOnly4test[bSender.sender] = &NonceMutex{int64(burnSenderNonce)}
+		_, err = bSender.Approve(ToWei(amount, d), int64(burnSenderNonce))
+		if err != nil {
+			fmt.Println("Approve failed:", err)
+			return
+		}
+	}
+
 	for i := 0; i < repeat; i++ {
 		bkey, err := newKeyFromMasterKey(masterKey, TypeEther, bip32.FirstHardenedChild, 0, uint32(i))
 		if err != nil {
 			fmt.Println("Failed to newKeyFromMasterKey with err:", err)
 			return
 		}
-		cpub, err := crypto.DecompressPubkey(bkey.PublicKey().Key)
+		cPub, err := crypto.DecompressPubkey(bkey.PublicKey().Key)
 		if err != nil {
 			panic(err)
 		}
-		signedTx, err := SignBurn(priv, token, crypto.PubkeyToAddress(*cpub).Hex(), new(big.Int).SetInt64(int64(chainID)), ToWei(amount/float64(repeat), d),
-			x2EthContracts.BridgeBank, client, rpcLaddr)
-		if err != nil {
-			fmt.Println("Burn err", err)
-			return
-		}
-		waitBurnChan <- signedTx
-		txHashes = append(txHashes, signedTx.burnHash.Hex())
-		fmt.Println("signed tx to burn index:", i, "txhash", signedTx.burnHash, "burn to:", crypto.PubkeyToAddress(*cpub).String())
-	}
+		if i < burnRepeat {
+			wg.Add(1)
+			go func(toAddr common.Address, index int) {
+				defer func() {
+					wg.Done()
+				}()
+				fmt.Println("signBurnTx index", index)
+				signedTx, err := bSender.SignBurn(toAddr)
+				if err != nil {
+					fmt.Println("Burn err", err)
+					return
+				}
+				waitBurnChan <- signedTx
+				txHashMutex.Lock()
+				txHashes = append(txHashes, signedTx.burnHash.Hex())
+				txHashMutex.Unlock()
 
-	go sendBurnTx(10)
+			}(crypto.PubkeyToAddress(*cPub), i)
+
+		}
+
+		//coins transfer
+		if sendCoins && i < coinsRepeat {
+			addr := crypto.PubkeyToAddress(*cPub)
+			nonce := mSender.nonce_start + uint64(i)
+			wg.Add(1)
+			go func(to common.Address, sNonce uint64, index int) {
+				defer func() {
+					wg.Done()
+				}()
+				fmt.Println("signJuTx index", index)
+				tx := mSender.SignJuTx(to, sNonce, big.NewInt(1e10))
+				signedTx := &waitBurn{
+					to:       to.Hex(),
+					amount:   tx.Value(),
+					burnHash: tx.Hash(),
+					client:   client,
+					tx:       tx,
+				}
+				waitBurnChan <- signedTx
+				txHashMutex.Lock()
+				txHashes = append(txHashes, signedTx.burnHash.Hex())
+				txHashMutex.Unlock()
+
+			}(addr, nonce, i)
+
+		}
+
+	}
+	wg.Wait()
+	fmt.Println("signed tx completed txhashes:", len(txHashes), "will send thoes tx by 50 go process")
+	time.Sleep(time.Second * 10)
+	go sendBurnTx(50)
 
 	for {
-		fmt.Println("wait  burned tx send current send num:", len(waitCheckTxStatus), "failednum:", len(failedBurn))
+		fmt.Println("wait  burned tx send current send num:", len(waitCheckTxStatus), "failednum:", len(failedBurn), "sendCount:", sendTxNum)
 		if len(waitCheckTxStatus)+len(failedBurn) == len(txHashes) {
 			close(waitBurnChan)
 			break
 		}
 
-		time.Sleep(time.Millisecond * 500)
+		time.Sleep(time.Millisecond * 800)
 	}
 
 	transferStatics := checkTxStatusOpt(waitCheckTxStatus, client)
@@ -153,19 +242,58 @@ func burn(mnemonic, priv, registerAddr, token, rpcLaddr string, repeat, chainID 
 
 }
 
-/*
-*
-*
-*
-*
-*
-*
-*
-*
-*
- */
+func sendBurnTx(proceeNum int) {
+	//多协程批量处理
+	for i := 0; i < proceeNum; i++ {
+		go func() {
+			for {
+				waitBurn, ok := <-waitBurnChan
+				if ok {
+					err := waitBurn.client.SendTransaction(context.Background(), waitBurn.tx)
+					if nil != err {
+						fmt.Println(" SendTransaction err", err.Error())
+						waitCheckMutex.Lock()
+						failedBurn = append(failedBurn, waitBurn.tx)
+						waitCheckMutex.Unlock()
+						continue
+					}
+
+					waitCheckMutex.Lock()
+					waitCheckTxStatus = append(waitCheckTxStatus, waitBurn.tx)
+					waitCheckMutex.Unlock()
+					atomic.AddInt32(&sendTxNum, 1)
+
+				} else {
+					fmt.Println("channel closed")
+					return
+				}
+			}
+		}()
+	}
+
+}
 
 // -----------------------------
+
+var (
+	waitCheckMutex    sync.Mutex
+	waitCheckTxStatus []*types.Transaction
+	failedBurn        []*types.Transaction
+	sendTxNum         int32
+	waitBurnChan      = make(chan *waitBurn, 102400)
+)
+
+type burnSender struct {
+	sender         common.Address
+	senderKey      *ecdsa.PrivateKey
+	client         ethinterface.EthClientSpec
+	tokenAddr      common.Address
+	bridgeBankIns  *generated.BridgeBank
+	bridgeBankAddr common.Address
+	chainID2wd     *big.Int
+	amount         *big.Int
+}
+
 type waitBurn struct {
 	to           string
 	amount       *big.Int
@@ -174,44 +302,6 @@ type waitBurn struct {
 	providerHttp string
 	isPeinding   bool
 	tx           *types.Transaction
-}
-
-var (
-	waitBurnChan = make(chan *waitBurn, 102400)
-
-	waitCheckTxStatus []*types.Transaction
-	failedBurn        []*types.Transaction
-)
-
-// GetDecimalsFromNode ...
-func GetDecimalsFromNode(addr, rpcLaddr string) (int64, error) {
-	if addr == "0x0000000000000000000000000000000000000000" || addr == "" {
-		return 18, nil
-	}
-
-	client, err := ethclient.Dial(rpcLaddr)
-	if err != nil {
-		log.Error("GetDecimals", "SetupEthClient error:", err.Error())
-		return 0, err
-	}
-	owner := common.HexToAddress(addr)
-	caller, err := erc20.NewERC20Caller(owner, client)
-	if err != nil {
-		log.Error("GetDecimals", "NewERC20Caller error:", err.Error())
-		return 0, err
-	}
-	opts := &bind.CallOpts{
-		Pending: true,
-		From:    owner,
-		Context: context.Background(),
-	}
-	caller.Decimals(opts)
-	decimals, err := caller.Decimals(opts)
-	if err != nil {
-		log.Error("GetDecimals", "ParseInt error:", err.Error())
-		return 0, err
-	}
-	return int64(decimals), nil
 }
 
 // X2EthContractsOnJu ...
@@ -249,6 +339,8 @@ type DeployResult struct {
 // ContractRegistry :
 type ContractRegistry byte
 
+var addr2NonceOnly4test = make(map[common.Address]*NonceMutex)
+
 const (
 	// Valset : valset contract
 	Valset ContractRegistry = iota + 1
@@ -265,6 +357,130 @@ const (
 	GasLimit4Deploy             = uint64(0)
 	PendingDuration4TxExeuction = 300
 )
+
+// Approve
+func (b *burnSender) Approve(amount *big.Int, nonce int64) (string, error) {
+
+	var prepareDone bool
+	var err error
+	defer func() {
+		if err != nil && prepareDone {
+			_, _ = revokeNonce(b.sender)
+		}
+	}()
+
+	auth, err := PrepareAuth(b.client, b.senderKey, b.sender)
+	if nil != err {
+
+		return "", err
+	}
+	auth.Nonce = big.NewInt(nonce)
+
+	prepareDone = true
+
+	//tokenAddr := common.HexToAddress(tokenAddrstr)
+	tokenInstance, err := generated.NewBridgeToken(b.tokenAddr, b.client)
+	if nil != err {
+
+		return "", err
+	}
+
+	//btcbank 是bridgeBank的基类，所以使用bridgeBank的地址
+	tx, err := tokenInstance.Approve(auth, b.bridgeBankAddr, amount)
+	if nil != err {
+
+		return "", err
+	}
+
+	err = waitEthTxFinished(b.client, tx.Hash(), "Approve")
+	if nil != err {
+
+		return "", err
+	}
+
+	return "", nil
+
+}
+
+// Burn ...
+func (b *burnSender) SignBurn(receiver common.Address) (*waitBurn, error) {
+	var err error
+	var prepareDone bool
+	defer func() {
+		if err != nil && prepareDone {
+			_, _ = revokeNonce(b.sender)
+		}
+	}()
+
+	opts := &bind.CallOpts{
+		Pending: false,
+		From:    common.Address{},
+		Context: context.Background(),
+	}
+
+	// add the servicefee to value
+	bridgeServiceFee, err := b.bridgeBankIns.BridgeServiceFee(opts)
+	if nil != err {
+		log.Error("LockEthErc20Asset", "Get BridgeServiceFee err", err.Error())
+		return nil, err
+	}
+
+	prepareDone = false
+
+	auth, err := PrepareAuth(b.client, b.senderKey, b.sender)
+	if nil != err {
+		log.Error("Burn::PrepareAuth", "err", err.Error())
+		return nil, err
+	}
+	auth.Value.SetInt64(bridgeServiceFee.Int64())
+	prepareDone = true
+	auth.NoSend = true
+	tx, err := b.bridgeBankIns.BurnBridgeTokens(auth, b.chainID2wd, receiver, b.tokenAddr, b.amount)
+	if nil != err {
+		log.Error("Burn::BurnBridgeTokens", "err", err.Error())
+		return nil, err
+	}
+
+	return &waitBurn{
+		to:       receiver.Hex(),
+		amount:   b.amount,
+		burnHash: tx.Hash(),
+		client:   b.client,
+		tx:       tx,
+	}, nil
+
+}
+
+// GetDecimalsFromNode ...
+func GetDecimalsFromNode(addr, rpcLaddr string) (int64, error) {
+	if addr == "0x0000000000000000000000000000000000000000" || addr == "" {
+		return 18, nil
+	}
+
+	client, err := ethclient.Dial(rpcLaddr)
+	if err != nil {
+		log.Error("GetDecimals", "SetupEthClient error:", err.Error())
+		return 0, err
+	}
+	owner := common.HexToAddress(addr)
+	caller, err := erc20.NewERC20Caller(owner, client)
+	if err != nil {
+		log.Error("GetDecimals", "NewERC20Caller error:", err.Error())
+		return 0, err
+	}
+	opts := &bind.CallOpts{
+		Pending: true,
+		From:    owner,
+		Context: context.Background(),
+	}
+	caller.Decimals(opts)
+	decimals, err := caller.Decimals(opts)
+	if err != nil {
+		log.Error("GetDecimals", "ParseInt error:", err.Error())
+		return 0, err
+	}
+	return int64(decimals), nil
+}
 
 func RecoverContractHandler4Dstju(registerAddr, nodeAddr string) (*ethclient.Client, *X2EthContractsOnJu, *X2EthDeployInfo, error) {
 	if registerAddr == "" {
@@ -409,138 +625,6 @@ func GetAddressFromBridgeRegistry(client ethinterface.EthClientSpec, sender, reg
 	}
 }
 
-func sendBurnTx(processNum int) {
-
-	//批量10个协程
-	for i := 0; i < processNum; i++ {
-		go func() {
-			for {
-				waitBurn, ok := <-waitBurnChan
-				if ok {
-					err := waitBurn.client.SendTransaction(context.Background(), waitBurn.tx)
-					if nil != err {
-						log.Error("Burn::waitEthTxFinished", "err", err.Error())
-						failedBurn = append(failedBurn, waitBurn.tx)
-						return
-					}
-
-					waitCheckTxStatus = append(waitCheckTxStatus, waitBurn.tx)
-				} else {
-					fmt.Println("channel return")
-					return
-				}
-			}
-		}()
-	}
-
-}
-
-func Approve(ownerPrivateKeyStr, tokenAddrstr string, bridgeBank common.Address, amount *big.Int,
-	client ethinterface.EthClientSpec, providerHttp string) (string, error) {
-
-	ownerPrivateKey, err := crypto.ToECDSA(common.FromHex(ownerPrivateKeyStr))
-	if nil != err {
-		return "", err
-	}
-	ownerAddr := crypto.PubkeyToAddress(ownerPrivateKey.PublicKey)
-	var prepareDone bool
-
-	defer func() {
-		if err != nil && prepareDone {
-			_, _ = revokeNonce(ownerAddr)
-		}
-	}()
-	auth, err := PrepareAuth(client, ownerPrivateKey, ownerAddr)
-	if nil != err {
-		log.Error("Burn::PrepareAuth", "err", err.Error())
-		return "", err
-	}
-
-	prepareDone = true
-
-	tokenAddr := common.HexToAddress(tokenAddrstr)
-	tokenInstance, err := generated.NewBridgeToken(tokenAddr, client)
-	if nil != err {
-		log.Error("Burn::NewBridgeToken", "err", err.Error())
-		return "", err
-	}
-
-	//btcbank 是bridgeBank的基类，所以使用bridgeBank的地址
-	tx, err := tokenInstance.Approve(auth, bridgeBank, amount)
-	if nil != err {
-		log.Error("Burn::Approve", "err", err.Error())
-		return "", err
-	}
-
-	err = waitEthTxFinished(client, tx.Hash(), "Approve", providerHttp)
-	if nil != err {
-		log.Error("Burn::waitEthTxFinished", "err", err.Error())
-		return "", err
-	}
-	log.Info("Burn", "Approve tx with hash", tx.Hash().String())
-	return "", nil
-
-}
-
-// Burn ...
-func SignBurn(ownerPrivateKeyStr, tokenAddrstr, receiver string, chainID2wd, amount *big.Int,
-	bridgeBankIns *generated.BridgeBank, client ethinterface.EthClientSpec, providerHttp string) (*waitBurn, error) {
-	log.Info("auxiliary::Burn", "tokenAddrstr", tokenAddrstr, "btcReceiver", receiver, "amount", amount.String(), "ownerPrivateKeyStr", ownerPrivateKeyStr)
-
-	ownerPrivateKey, err := crypto.ToECDSA(common.FromHex(ownerPrivateKeyStr))
-	if nil != err {
-		return nil, err
-	}
-	ownerAddr := crypto.PubkeyToAddress(ownerPrivateKey.PublicKey)
-	var prepareDone bool
-
-	defer func() {
-		if err != nil && prepareDone {
-			_, _ = revokeNonce(ownerAddr)
-		}
-	}()
-	tokenAddr := common.HexToAddress(tokenAddrstr)
-
-	opts := &bind.CallOpts{
-		Pending: false,
-		From:    common.Address{},
-		Context: context.Background(),
-	}
-
-	// add the servicefee to value
-	bridgeServiceFee, err := bridgeBankIns.BridgeServiceFee(opts)
-	if nil != err {
-		log.Error("LockEthErc20Asset", "Get BridgeServiceFee err", err.Error())
-		return nil, err
-	}
-
-	prepareDone = false
-
-	auth, err := PrepareAuth(client, ownerPrivateKey, ownerAddr)
-	if nil != err {
-		log.Error("Burn::PrepareAuth", "err", err.Error())
-		return nil, err
-	}
-	auth.Value.SetInt64(bridgeServiceFee.Int64())
-	prepareDone = true
-	auth.NoSend = true
-	tx, err := bridgeBankIns.BurnBridgeTokens(auth, chainID2wd, common.HexToAddress(receiver), tokenAddr, amount)
-	if nil != err {
-		log.Error("Burn::BurnBridgeTokens", "err", err.Error())
-		return nil, err
-	}
-
-	return &waitBurn{
-		to:           receiver,
-		amount:       amount,
-		burnHash:     tx.Hash(),
-		providerHttp: providerHttp,
-		client:       client,
-		tx:           tx,
-	}, nil
-
-}
-
 func revokeNonce4MultiEth(sender common.Address, addr2TxNonce map[common.Address]*NonceMutex) (*big.Int, error) {
 	if nonceMutex, exist := addr2TxNonce[sender]; exist {
 		//nonceMutex.RWLock.Lock()
@@ -563,8 +647,6 @@ func ToWei(amount float64, decimals int64) *big.Int {
 
 }
 
-var addr2NonceOnly4test = make(map[common.Address]*NonceMutex)
-
 type NonceMutex struct {
 	Nonce int64
 }
@@ -572,6 +654,7 @@ type NonceMutex struct {
 func PrepareAuth(client ethinterface.EthClientSpec, privateKey *ecdsa.PrivateKey, transactor common.Address) (*bind.TransactOpts, error) {
 	return PrepareAuth4MultiEthereum(client, privateKey, transactor, addr2NonceOnly4test)
 }
+
 func PrepareAuth4MultiEthereum(client ethinterface.EthClientSpec, privateKey *ecdsa.PrivateKey, transactor common.Address, addr2TxNonce map[common.Address]*NonceMutex) (*bind.TransactOpts, error) {
 	if nil == privateKey || nil == client {
 		log.Error("PrepareAuth", "nil input parameter", "client", client, "privateKey", privateKey)
@@ -603,7 +686,9 @@ func PrepareAuth4MultiEthereum(client ethinterface.EthClientSpec, privateKey *ec
 	}
 	auth.Value = big.NewInt(0) // in wei
 	auth.GasLimit = GasLimit4Deploy
-	auth.GasPrice = gasPrice
+	auth.GasPrice = big.NewInt(gasPrice.Int64() * 2)
+	nonceMutex.Lock()
+	defer nonceMutex.Unlock()
 
 	if auth.Nonce, err = getNonce4MultiEth(transactor, client, addr2TxNonce, false); err != nil {
 		return nil, err
@@ -612,27 +697,30 @@ func PrepareAuth4MultiEthereum(client ethinterface.EthClientSpec, privateKey *ec
 	return auth, nil
 }
 
+var nonceMutex sync.Mutex
+
 // fromChain 是否从链上获取
 func getNonce4MultiEth(sender common.Address, client ethinterface.EthClientSpec, addr2TxNonce map[common.Address]*NonceMutex, fromChain bool) (*big.Int, error) {
 	if fromChain {
 		return getNonceFromChain(sender, client, addr2TxNonce)
 	}
 	if nonceMutex, exist := addr2TxNonce[sender]; exist {
-		log.Debug("getNonce4MultiEth", "address", sender.String(), "nonce atomic.AddInt64 before", nonceMutex.Nonce)
+		//fmt.Println("getNonce4MultiEth address", sender.String(), "nonce atomic.AddInt64 before", nonceMutex.Nonce)
 		atomic.AddInt64(&nonceMutex.Nonce, 1)
 		addr2TxNonce[sender] = nonceMutex
-		log.Debug("getNonce4MultiEth", "address", sender.String(), "nonce atomic.AddInt64 after", nonceMutex.Nonce)
+		//fmt.Println("getNonce4MultiEth address", sender.String(), "nonce atomic.AddInt64 after", nonceMutex.Nonce)
 		return big.NewInt(nonceMutex.Nonce), nil
 	}
 	return getNonceFromChain(sender, client, addr2TxNonce)
 }
 
 func getNonceFromChain(sender common.Address, client ethinterface.EthClientSpec, addr2TxNonce map[common.Address]*NonceMutex) (*big.Int, error) {
+
 	nonce, err := client.PendingNonceAt(context.Background(), sender)
 	if nil != err {
 		return nil, err
 	}
-	log.Debug("getNonceFromChain", "address", sender.String(), "nonce", nonce)
+	//fmt.Println("getNonceFromChain address", sender.String(), "nonce", nonce)
 	n := new(NonceMutex)
 	n.Nonce = int64(nonce)
 	//n.RWLock = new(sync.RWMutex)
@@ -640,18 +728,11 @@ func getNonceFromChain(sender common.Address, client ethinterface.EthClientSpec,
 	return big.NewInt(int64(nonce)), nil
 }
 
-func waitEthTxFinished(client ethinterface.EthClientSpec, txhash common.Hash, txName, providerHttp string) error {
-	sim, isSim := client.(*ethinterface.SimExtend)
-	if isSim {
-		fmt.Println("in waitEthTxFinished Use the simulator")
-		sim.Commit()
-		return nil
-	}
+func waitEthTxFinished(client ethinterface.EthClientSpec, txhash common.Hash, txName string) error {
 
 	log.Info(txName, "Wait for tx to be finished executing with hash", txhash.String())
 	timeout := time.NewTimer(PendingDuration4TxExeuction * time.Second)
 	oneSecondtimeout := time.NewTicker(5 * time.Second)
-	count := 0
 
 	for {
 		select {
@@ -663,17 +744,10 @@ func waitEthTxFinished(client ethinterface.EthClientSpec, txhash common.Hash, tx
 			if err == ethereum.NotFound {
 				continue
 			} else if err != nil {
-				if count < 5 {
-					count++
-					client, err = SetupWebsocketEthClient(providerHttp)
-					if err != nil {
-						log.Error("waitEthTxFinished", "Failed to SetupWebsocketEthClient due to:", err.Error(), "count", count)
-						continue
-					}
-				}
+
 				return err
 			}
-			log.Info(txName, "Finished executing for tx", txhash.String())
+
 			return nil
 		}
 	}
