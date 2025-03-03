@@ -91,18 +91,26 @@ func burnTokenAT(cmd *cobra.Command, args []string) {
 		amount:         big.NewInt(1),
 		chainID2wd:     big.NewInt(int64(chainID)),
 		repeat:         repeat,
+		recvTxChan:     make(chan *types.Transaction, 20000),
+		proceeNum:      50,
 	}
 	addr2NonceOnly4test[bSender.sender] = &NonceMutex{int64(burnSenderNonce) - 1}
 	_, err = bSender.Approve(ToWei(amount, d), int64(burnSenderNonce))
 	if err != nil {
 		fmt.Println("Approve failed:", err)
-		panic(err)
+		if err.Error() == "already known" {
+
+		} else {
+			panic(err)
+		}
 	}
+
+	fmt.Println("Approve success")
 
 	signChan := make(chan *types.Transaction, 30000)
 	go signBurnTxAT(masterKey, bSender, signChan)
 	go waitSignBurnTxAT(signChan, bSender)
-	go waitSignBurnTxAT(signChan, bSender)
+	go waitSendBurnTxAT(bSender)
 	processStart := time.Now()
 
 	for {
@@ -111,40 +119,46 @@ func burnTokenAT(cmd *cobra.Command, args []string) {
 	}
 }
 
-func signBurnTxAT(masterKey *bip32.Key, sender *burnSender, signChan chan *types.Transaction) {
+func signBurnTxAT(masterKey *bip32.Key, sender *burnSender, sigChan chan *types.Transaction) {
 	numCPUs := runtime.NumCPU()
 	var count int64
 	for {
 		for i := 0; i < numCPUs; i++ {
 			go func(cpuCore int) {
-				bkey, err := newKeyFromMasterKey(masterKey, TypeEther, bip32.FirstHardenedChild, 0, uint32(atomic.AddInt64(&count, 1)))
-				if err != nil {
-					fmt.Println("Failed to newKeyFromMasterKey with err:", err)
-					panic(err)
-				}
+				for {
 
-				cpub, err := crypto.DecompressPubkey(bkey.PublicKey().Key)
-				if err != nil {
-					fmt.Println("Failed to DecompressPubkey with err:", err)
-					panic(err)
+					bkey, err := newKeyFromMasterKey(masterKey, TypeEther, bip32.FirstHardenedChild, 0, uint32(atomic.AddInt64(&count, 1)))
+					if err != nil {
+						fmt.Println("Failed to newKeyFromMasterKey with err:", err)
+						panic(err)
+					}
+
+					cpub, err := crypto.DecompressPubkey(bkey.PublicKey().Key)
+					if err != nil {
+						fmt.Println("Failed to DecompressPubkey with err:", err)
+						panic(err)
+					}
+
+					addr := crypto.PubkeyToAddress(*cpub)
+					signedTx, err := sender.SignBurn(addr)
+					if err != nil {
+						fmt.Println("Burn err", err)
+						return
+					}
+					fmt.Println("+++++++++4")
+					fmt.Println("sign tx success cpuCore:", cpuCore)
+					sigChan <- signedTx.tx
 				}
-				addr := crypto.PubkeyToAddress(*cpub)
-				signedTx, err := sender.SignBurn(addr)
-				if err != nil {
-					fmt.Println("Burn err", err)
-					return
-				}
-				waitBurnChan <- signedTx
 			}(i)
 		}
 
 	}
 }
 
-func waitSignBurnTxAT(signChan chan *types.Transaction, sender *burnSender) {
+func waitSignBurnTxAT(sigChan chan *types.Transaction, sender *burnSender) {
 	for {
-		if len(signChan) > sender.repeat {
-			for tx := range signChan {
+		if len(sigChan) > sender.repeat {
+			for tx := range sigChan {
 				sender.recvTxChan <- tx
 				if len(sender.recvTxChan) == sender.repeat {
 					sender.cycle++

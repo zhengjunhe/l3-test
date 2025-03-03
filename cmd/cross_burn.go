@@ -429,7 +429,7 @@ func (b *burnSender) SignBurn(receiver common.Address) (*waitBurn, error) {
 		log.Error("LockEthErc20Asset", "Get BridgeServiceFee err", err.Error())
 		return nil, err
 	}
-
+	fmt.Println("SignBurn+++++++++2")
 	prepareDone = false
 
 	auth, err := PrepareAuth(b.client, b.senderKey, b.sender)
@@ -437,6 +437,7 @@ func (b *burnSender) SignBurn(receiver common.Address) (*waitBurn, error) {
 		log.Error("Burn::PrepareAuth", "err", err.Error())
 		return nil, err
 	}
+	fmt.Println("SignBurn+++++++++3")
 	auth.Value.SetInt64(bridgeServiceFee.Int64())
 	prepareDone = true
 	auth.NoSend = true
@@ -445,7 +446,7 @@ func (b *burnSender) SignBurn(receiver common.Address) (*waitBurn, error) {
 		log.Error("Burn::BurnBridgeTokens", "err", err.Error())
 		return nil, err
 	}
-
+	fmt.Println("SignBurn+++++++++4")
 	return &waitBurn{
 		to:       receiver.Hex(),
 		amount:   b.amount,
@@ -669,24 +670,17 @@ func PrepareAuth4MultiEthereum(client ethinterface.EthClientSpec, privateKey *ec
 	}
 
 	ctx := context.Background()
-	gasPrice, err := client.SuggestGasPrice(ctx)
-	if err != nil {
-		log.Error("PrepareAuth", "Failed to SuggestGasPrice due to:", err.Error())
-		return nil, errors.New("failed to get suggest gas price " + err.Error())
+	var gasPrice = big.NewInt(0)
+	var err error
+	if gasPrice.Int64() == 0 {
+		gasPrice, err = client.SuggestGasPrice(ctx)
+		if err != nil {
+			log.Error("PrepareAuth", "Failed to SuggestGasPrice due to:", err.Error())
+			return nil, errors.New("failed to get suggest gas price " + err.Error())
+		}
 	}
 
-	chainID, err := client.NetworkID(ctx)
-	if err != nil {
-		log.Error("PrepareAuth NetworkID", "err", err)
-		return nil, err
-	}
-
-	_, isSim := client.(*ethinterface.SimExtend)
-	if isSim {
-		chainID = big.NewInt(1337)
-	}
-
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
+	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, big.NewInt(chainID))
 	if err != nil {
 		log.Error("PrepareAuth NewKeyedTransactorWithChainID", "err", err, "chainID", chainID)
 		return nil, err
