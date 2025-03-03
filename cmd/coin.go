@@ -82,7 +82,7 @@ func transfer(cmd *cobra.Command, args []string) {
 	mSender.sender = ethSender
 	mSender.senderKey = masterpriv
 	mSender.nonce_start = nonce
-	mSender.recvTxChan = make(chan *types.Transaction, 50)
+	mSender.recvTxChan = make(chan *types.Transaction, 20000)
 
 	var privkeyArr []*ecdsa.PrivateKey
 	var txs []*types.Transaction
@@ -121,7 +121,7 @@ func transfer(cmd *cobra.Command, args []string) {
 	for {
 		time.Sleep(time.Millisecond * 300)
 		fmt.Println("[      send txNum     ]:", mSender.sendTxNum, "process num:", mSender.proceeNum)
-		if mSender.sendTxNum == len(txs) {
+		if int(mSender.sendTxNum) == len(txs) {
 			close(mSender.recvTxChan)
 			break
 		}
@@ -134,8 +134,6 @@ func transfer(cmd *cobra.Command, args []string) {
 		}
 		time.Sleep(time.Second)
 	}
-
-	//blockOccupided := make(map[int64]bool)
 
 	transferStatics := checkTxStatusOpt(txs, client)
 
@@ -357,10 +355,12 @@ type multiSender struct {
 	senderKey   *ecdsa.PrivateKey
 	recvTxChan  chan *types.Transaction
 	proceeNum   int
-	sendTxNum   int
+	sendTxNum   int64
 	mutex       sync.Mutex
 	txMutex     sync.Mutex
 	atoTxNum    int32
+	repeat      int32
+	cycle       int32
 }
 
 func (m *multiSender) sendJuTxV2(i int) {
@@ -405,7 +405,7 @@ func (m *multiSender) SignJuTx(to common.Address, nonce uint64, amount *big.Int)
 			log.Fatalf("Failed to suggest gas price: %v", err)
 		}
 	}
-	fmt.Println("gasprice:", gasPrice)
+
 	// 5. 创建交易
 	tx := types.NewTransaction(nonce, to, amount, gasLimit, big.NewInt(gasPrice.Int64()*4), nil)
 	// 6. 使用私钥签名交易
@@ -419,7 +419,7 @@ func (m *multiSender) SignJuTx(to common.Address, nonce uint64, amount *big.Int)
 
 const Purpose uint32 = 0x8000002C
 const TypeEther uint32 = 0x8000003c
-const chainID = 66633666
+const chainID = 66682666
 
 func newKeyFromMasterKey(masterKey *bip32.Key, coin, account, chain, address uint32) (*bip32.Key, error) {
 	child, err := masterKey.NewChildKey(Purpose)

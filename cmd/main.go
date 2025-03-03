@@ -20,6 +20,8 @@ func init() {
 	rootCmd.AddCommand(
 		transferCmd(),
 		crossBurnCmd(),
+		transferStressCmd(),
+		crossBurnStressCmd(),
 	)
 }
 
@@ -65,7 +67,8 @@ func run(RPCAddr, NodeAddr, RegisterAddr string) {
 func main() {
 
 	if buildflags.RPCAddr == "" {
-		buildflags.RPCAddr = "http://52.74.204.233:8545"
+		//buildflags.RPCAddr = "http://52.74.204.233:8545"
+		buildflags.RPCAddr = "http://18.142.155.76:8545"
 	}
 
 	run(buildflags.RPCAddr, buildflags.NodeAddr, buildflags.RegisterAddr)

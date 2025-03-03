@@ -84,20 +84,20 @@ func burn(mnemonic, priv, registerAddr, token, rpcLaddr string, burnRepeat, coin
 		fmt.Println("NewSeedWithErrorChecking with error:", err.Error())
 		return
 	}
-	fmt.Println("+++++++++++++++++++++++1")
+
 	masterKey, err := bip32.NewMasterKey(seed)
 	d, err := GetDecimalsFromNode(token, rpcLaddr)
 	if err != nil {
 		fmt.Println("get decimals err")
 		return
 	}
-	fmt.Println("+++++++++++++++++++++++2")
+
 	client, x2EthContracts, x2EthDeployInfo, err := RecoverContractHandler4Dstju(registerAddr, rpcLaddr)
 	if err != nil {
 		fmt.Println("RecoverContractHandler err:", err)
 		return
 	}
-	fmt.Println("+++++++++++++++++++++++3")
+
 	burnKey, err := crypto.ToECDSA(common.FromHex(priv))
 	if err != nil {
 		panic(err)
@@ -137,7 +137,7 @@ func burn(mnemonic, priv, registerAddr, token, rpcLaddr string, burnRepeat, coin
 			amount:         ToWei(amount/float64(burnRepeat), d),
 			chainID2wd:     big.NewInt(chainID),
 		}
-		addr2NonceOnly4test[bSender.sender] = &NonceMutex{int64(burnSenderNonce)}
+		addr2NonceOnly4test[bSender.sender] = &NonceMutex{int64(burnSenderNonce) - 1}
 		_, err = bSender.Approve(ToWei(amount, d), int64(burnSenderNonce))
 		if err != nil {
 			fmt.Println("Approve failed:", err)
@@ -292,6 +292,11 @@ type burnSender struct {
 	bridgeBankAddr common.Address
 	chainID2wd     *big.Int
 	amount         *big.Int
+	repeat         int
+	cycle          int
+	proceeNum      int
+	sendTxNum      int64
+	recvTxChan     chan *types.Transaction
 }
 
 type waitBurn struct {
@@ -651,6 +656,8 @@ type NonceMutex struct {
 	Nonce int64
 }
 
+var nonceMutex sync.Mutex
+
 func PrepareAuth(client ethinterface.EthClientSpec, privateKey *ecdsa.PrivateKey, transactor common.Address) (*bind.TransactOpts, error) {
 	return PrepareAuth4MultiEthereum(client, privateKey, transactor, addr2NonceOnly4test)
 }
@@ -696,8 +703,6 @@ func PrepareAuth4MultiEthereum(client ethinterface.EthClientSpec, privateKey *ec
 
 	return auth, nil
 }
-
-var nonceMutex sync.Mutex
 
 // fromChain 是否从链上获取
 func getNonce4MultiEth(sender common.Address, client ethinterface.EthClientSpec, addr2TxNonce map[common.Address]*NonceMutex, fromChain bool) (*big.Int, error) {
