@@ -184,20 +184,22 @@ func waitSendBurnTxAT(sender *burnSender) {
 	for i := 0; i < sender.proceeNum; i++ {
 		go func(index int) {
 			for {
-
-				<-runChan
 				client, err := ethclient.Dial(sender.nodeUrl)
 				if err != nil {
 					fmt.Println(err)
 					panic(err)
 				}
+				ctx, _ := context.WithTimeout(context.Background(), time.Second*2)
+				<-runChan
+				//fmt.Println("wait runChan+++ok")
 
 				for tx := range sender.recvTxChan {
 
-					err := client.SendTransaction(context.Background(), tx)
+					err := client.SendTransaction(ctx, tx)
 					if err != nil {
 						fmt.Println("Failed to sendTxAT with err:", err, "will retry...")
-
+						client, _ = ethclient.Dial(sender.nodeUrl)
+						_ = client.SendTransaction(ctx, tx)
 					}
 					atomic.AddInt64(&sender.sendTxNum, 1)
 					if sender.view {
@@ -205,6 +207,7 @@ func waitSendBurnTxAT(sender *burnSender) {
 					}
 
 					if len(sender.recvTxChan) == 0 {
+						//fmt.Println("break,processNum:", index)
 						break
 					}
 				}

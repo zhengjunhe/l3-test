@@ -88,6 +88,7 @@ func burnTokenATV2(cmd *cobra.Command, args []string) {
 		proceeNum:      50,
 		nodeUrl:        rpcLaddr,
 		approve:        approve,
+		view:           view,
 		//child:          make(chan *childKeyAddr, 3000),
 	}
 
@@ -262,22 +263,25 @@ func waitSignBurnTxATV2(sigChan chan *types.Transaction, sender *burnSender) {
 		fmt.Println("len(sigChan):", len(sigChan), "sender.repeat", sender.repeat)
 		//if len(sigChan) >= sender.repeat {
 		var count int
-		fmt.Println("waitSignBurnTxATV2++++++++++++1")
+		//fmt.Println("waitSignBurnTxATV2++++++++++++1")
 
 		for tx := range sigChan {
 			count++
 			sender.recvTxChan <- tx
 			if count >= sender.repeat {
-				fmt.Println("waitSignBurnTxATV2++++++++++++2")
+				//fmt.Println("waitSignBurnTxATV2++++++++++++2")
 				for i := 0; i < sender.proceeNum; i++ {
 					runChan <- true
 				}
+
 				count = 0
-				continue
+				//if len(sender.recvTxChan) == 0 {
+				//					continue
+				//				}
+
 			}
 
 		}
-		//}
 
 	}
 	//time.Sleep(1 * time.Second)
