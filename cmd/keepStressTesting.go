@@ -57,7 +57,7 @@ func signTxAT(masterKey *bip32.Key, sender *multiSender, signChan chan *types.Tr
 	}
 }
 
-var runChan = make(chan bool)
+var runChan = make(chan bool, 50)
 
 func waitSignTxAT(signChan chan *types.Transaction, sender *multiSender) {
 	for {

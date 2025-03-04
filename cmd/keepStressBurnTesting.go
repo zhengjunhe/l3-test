@@ -192,28 +192,20 @@ func waitSendBurnTxAT(sender *burnSender) {
 					panic(err)
 				}
 
-				for {
-					tx, ok := <-sender.recvTxChan
-					if ok {
-						err := client.SendTransaction(context.Background(), tx)
-						if err != nil {
-							fmt.Println("Failed to sendTxAT with err:", err, "will retry...")
-							//var tryTimes int
-							//for i := 0; i < tryTimes; i++ {
-							//	client, _ = ethclient.Dial(sender.nodeUrl)
-							//	err = client.SendTransaction(context.Background(), tx)
-							//	if err == nil {
-							//		break
-							//	}
-							//}
+				for tx := range sender.recvTxChan {
 
-						}
-						atomic.AddInt64(&sender.sendTxNum, 1)
-						if len(sender.recvTxChan) == 0 {
-							break
-						}
+					err := client.SendTransaction(context.Background(), tx)
+					if err != nil {
+						fmt.Println("Failed to sendTxAT with err:", err, "will retry...")
+
+					}
+					atomic.AddInt64(&sender.sendTxNum, 1)
+					if sender.view {
 						fmt.Println("send tx at:", tx.Hash().Hex(), "processNum:", index, "tx.Nonce:", tx.Nonce())
+					}
 
+					if len(sender.recvTxChan) == 0 {
+						break
 					}
 				}
 

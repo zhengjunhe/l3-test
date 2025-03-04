@@ -309,7 +309,9 @@ type burnSender struct {
 	gasPrice         *big.Int
 	nodeUrl          string
 	//child            chan *childKeyAddr
-	child []*childKeyAddr
+	child   []*childKeyAddr
+	approve bool
+	view    bool
 }
 
 type waitBurn struct {
@@ -370,7 +372,7 @@ const (
 	Bridge
 )
 const (
-	GasLimit                    = uint64(20 * 10000)
+	GasLimit                    = uint64(80 * 10000)
 	GasLimit4RelayTx            = uint64(80 * 10000) //这个地方可能会由于链的不同或者升级，导致gas变多，超出limit，定位方法是查看Internal Txns 的 trace 里是不是有gas out报错
 	GasLimit4Deploy             = uint64(0)
 	PendingDuration4TxExeuction = 300

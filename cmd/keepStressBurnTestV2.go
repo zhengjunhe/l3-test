@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"fmt"
+
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -35,11 +36,11 @@ func addBurnStressV2Flags(cmd *cobra.Command) {
 	cmd.Flags().StringP("token", "t", "", "token contract address")
 	cmd.Flags().StringP("registerAddr", "c", "", "registerAddr contract address")
 	cmd.Flags().IntP("repeat", "r", 3000, "repeat number")
-
 	_ = cmd.MarkFlagRequired("registerAddr")
-
 	cmd.Flags().StringP("mnemonic", "m", "", "mnemonic")
 	_ = cmd.MarkFlagRequired("mnemonic")
+	cmd.Flags().BoolP("approve", "a", false, "approve for burn")
+	cmd.Flags().BoolP("view", "v", false, "view burn tx hash")
 
 }
 
@@ -49,10 +50,11 @@ func burnTokenATV2(cmd *cobra.Command, args []string) {
 	registerAddr, _ := cmd.Flags().GetString("registerAddr")
 	repeat, _ := cmd.Flags().GetInt("repeat")
 	chainIDWd, err := cmd.Flags().GetInt("chainID")
-
+	approve, _ := cmd.Flags().GetBool("approve")
+	view, _ := cmd.Flags().GetBool("view")
 	fmt.Println("registerAddr:", registerAddr)
 	fmt.Println("token:", token)
-
+	fmt.Println("approve for burn:", approve)
 	if err != nil {
 		panic(err)
 	}
@@ -85,6 +87,7 @@ func burnTokenATV2(cmd *cobra.Command, args []string) {
 		recvTxChan:     make(chan *types.Transaction, 2000),
 		proceeNum:      50,
 		nodeUrl:        rpcLaddr,
+		approve:        approve,
 		//child:          make(chan *childKeyAddr, 3000),
 	}
 
@@ -209,8 +212,7 @@ func SignBurn(bSender *burnSender, senderAddr common.Address, signKey *ecdsa.Pri
 	}
 
 	//aprove
-	//tokenAddr := common.HexToAddress(tokenAddrstr)
-	if bSender.cycle == 0 { //第一次需要approve
+	if bSender.cycle == 0 && bSender.approve { //第一次需要approve
 		auth, err := PrepareAuth(bSender.client, signKey, senderAddr)
 		if nil != err {
 
@@ -222,7 +224,7 @@ func SignBurn(bSender *burnSender, senderAddr common.Address, signKey *ecdsa.Pri
 
 			panic(err)
 		}
-		auth.NoSend = true
+		//auth.NoSend = true
 		//btcbank 是bridgeBank的基类，所以使用bridgeBank的地址
 		//fmt.Println("gas:", auth.GasLimit, "sender:", senderAddr)
 
@@ -230,16 +232,23 @@ func SignBurn(bSender *burnSender, senderAddr common.Address, signKey *ecdsa.Pri
 		if nil != err {
 			panic(err)
 		}
-		txs = append(txs, tx)
+		//fmt.Println("+++++++approve tx:", tx.Hash().Hex(), "nonce:", tx.Nonce(), "from:", senderAddr)
+		err = waitEthTxFinished(bSender.client, tx.Hash(), "Approve")
+		if nil != err {
+			fmt.Println("waitEthTxFinished:", err)
+			return nil, err
+		}
+
 	}
 
-	//fmt.Println("chainIDWd:", b.chainID2wd, "receiver:", receiver.Hex(), "tokenAddr:", b.tokenAddr, "amount:", b.amount)
 	auth, err := PrepareAuth(bSender.client, signKey, senderAddr)
 	if nil != err {
 		return nil, err
 	}
-	auth.NoSend = true
 
+	auth.Value.SetInt64(bSender.bridgeServiceFee.Int64())
+	auth.NoSend = true
+	//fmt.Println("chainIDWd:", bSender.chainID2wd, "receiver:", senderAddr, "tokenAddr:", bSender.tokenAddr, "amount:", bSender.amount, "nonce", auth.Nonce)
 	tx, err := bSender.bridgeBankIns.BurnBridgeTokens(auth, bSender.chainID2wd, senderAddr, bSender.tokenAddr, bSender.amount)
 	if nil != err {
 		return nil, err
@@ -250,46 +259,27 @@ func SignBurn(bSender *burnSender, senderAddr common.Address, signKey *ecdsa.Pri
 
 func waitSignBurnTxATV2(sigChan chan *types.Transaction, sender *burnSender) {
 	for {
+		fmt.Println("len(sigChan):", len(sigChan), "sender.repeat", sender.repeat)
+		//if len(sigChan) >= sender.repeat {
+		var count int
+		fmt.Println("waitSignBurnTxATV2++++++++++++1")
 
-		if sender.cycle == 0 {
-			if len(sigChan) >= sender.repeat*2 {
-				for tx := range sigChan {
-					sender.recvTxChan <- tx
-					if len(sender.recvTxChan) == sender.repeat*2 {
-						//send signal for mutisend
-						//每间隔3000笔交易就发送信号批量集中发送达到压测的目的
-						for i := 0; i < sender.proceeNum; i++ {
-							runChan <- true
-
-						}
-						break
-					}
+		for tx := range sigChan {
+			count++
+			sender.recvTxChan <- tx
+			if count >= sender.repeat {
+				fmt.Println("waitSignBurnTxATV2++++++++++++2")
+				for i := 0; i < sender.proceeNum; i++ {
+					runChan <- true
 				}
-
-			}
-
-		} else {
-
-			if len(sigChan) >= sender.repeat {
-
-				for tx := range sigChan {
-
-					sender.recvTxChan <- tx
-
-					if len(sender.recvTxChan) == sender.repeat {
-						fmt.Println("<<<<<<<<<<<<<<<<<<<<<<<<<<++collect tx completed will send signal ")
-						//send signal for mutisend
-						//每间隔3000笔交易就发送信号批量集中发送达到压测的目的
-						for i := 0; i < sender.proceeNum; i++ {
-							runChan <- true
-
-						}
-						break
-					}
-				}
+				count = 0
+				continue
 			}
 
 		}
-		//time.Sleep(1 * time.Second)
+		//}
+
 	}
+	//time.Sleep(1 * time.Second)
+
 }
