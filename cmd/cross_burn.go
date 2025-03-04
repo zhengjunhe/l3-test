@@ -304,6 +304,7 @@ type burnSender struct {
 	cycle            int
 	proceeNum        int
 	sendTxNum        int64
+	sendErrTxNum     int64
 	recvTxChan       chan *types.Transaction
 	bridgeServiceFee *big.Int
 	gasPrice         *big.Int

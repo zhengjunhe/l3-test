@@ -12,6 +12,7 @@ import (
 	"github.com/tyler-smith/go-bip39"
 	"math/big"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -109,7 +110,7 @@ func burnTokenAT(cmd *cobra.Command, args []string) {
 
 	fmt.Println("Approve success")
 
-	signChan := make(chan *types.Transaction, 30000)
+	signChan := make(chan *types.Transaction, 10000)
 	go signBurnTxAT(masterKey, bSender, signChan)
 	go waitSignBurnTxAT(signChan, bSender)
 	go waitSendBurnTxAT(bSender)
@@ -176,6 +177,8 @@ func waitSignBurnTxAT(sigChan chan *types.Transaction, sender *burnSender) {
 	}
 }
 
+var nonceMutex sync.Mutex
+
 func waitSendBurnTxAT(sender *burnSender) {
 
 	if sender.proceeNum == 0 {
@@ -189,17 +192,19 @@ func waitSendBurnTxAT(sender *burnSender) {
 					fmt.Println(err)
 					panic(err)
 				}
-				ctx, _ := context.WithTimeout(context.Background(), time.Second*2)
 				<-runChan
-				//fmt.Println("wait runChan+++ok")
-
 				for tx := range sender.recvTxChan {
 
-					err := client.SendTransaction(ctx, tx)
+					err := client.SendTransaction(context.Background(), tx)
 					if err != nil {
 						fmt.Println("Failed to sendTxAT with err:", err, "will retry...")
-						client, _ = ethclient.Dial(sender.nodeUrl)
-						_ = client.SendTransaction(ctx, tx)
+
+						signer := types.NewEIP155Signer(tx.ChainId())
+						from, _ := types.Sender(signer, tx)
+						nonceMutex.Lock()
+						_, _ = revokeNonce(from)
+						nonceMutex.Unlock()
+						continue
 					}
 					atomic.AddInt64(&sender.sendTxNum, 1)
 					if sender.view {

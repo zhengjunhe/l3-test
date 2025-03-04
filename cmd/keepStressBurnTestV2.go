@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"fmt"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -84,7 +86,7 @@ func burnTokenATV2(cmd *cobra.Command, args []string) {
 		amount:         big.NewInt(1),
 		chainID2wd:     big.NewInt(int64(chainIDWd)),
 		repeat:         repeat,
-		recvTxChan:     make(chan *types.Transaction, 2000),
+		recvTxChan:     make(chan *types.Transaction, 5000),
 		proceeNum:      50,
 		nodeUrl:        rpcLaddr,
 		approve:        approve,
@@ -94,16 +96,17 @@ func burnTokenATV2(cmd *cobra.Command, args []string) {
 
 	bSender.genMutiKeyAddr(masterKey)
 
-	signChan := make(chan *types.Transaction, 30000)
+	signChan := make(chan *types.Transaction, 10000)
 	//循环批量签名
 	go signBurnTxATV2(bSender, signChan)
 	//等待签名数量达到一定后往发送管道输送
 	go waitSignBurnTxATV2(signChan, bSender)
-	go waitSendBurnTxAT(bSender)
+	go waitSendBurnTxATV2(bSender)
 	processStart := time.Now()
 
 	for {
-		fmt.Println("signChan capacity", len(signChan), "recvTxChan capacity", len(bSender.recvTxChan), "total send tx:", bSender.sendTxNum, "cycle times:", bSender.cycle, "cost time:", time.Since(processStart))
+		fmt.Println("signChan capacity", len(signChan), "recvTxChan capacity", len(bSender.recvTxChan), "runchan:", len(runChan),
+			"success send tx:", bSender.sendTxNum, "failed tx:", bSender.sendErrTxNum, "cycle times:", bSender.cycle, "cost time:", time.Since(processStart))
 		time.Sleep(time.Second)
 	}
 }
@@ -170,7 +173,7 @@ func signBurnTxATV2(sender *burnSender, sigChan chan *types.Transaction) {
 		}
 
 		wg.Wait()
-		fmt.Println("wait for sign completed++++,cycle:", sender.cycle)
+		//fmt.Println("wait for sign completed++++,cycle:", sender.cycle)
 		sender.cycle++
 	}
 
@@ -260,30 +263,77 @@ func SignBurn(bSender *burnSender, senderAddr common.Address, signKey *ecdsa.Pri
 
 func waitSignBurnTxATV2(sigChan chan *types.Transaction, sender *burnSender) {
 	for {
-		fmt.Println("len(sigChan):", len(sigChan), "sender.repeat", sender.repeat)
-		//if len(sigChan) >= sender.repeat {
+		//fmt.Println("len(sigChan):", len(sigChan), "sender.repeat", sender.repeat, "recvchan len", len(sender.recvTxChan))
+		//time.Sleep(time.Millisecond * 300)
 		var count int
-		//fmt.Println("waitSignBurnTxATV2++++++++++++1")
+		if len(sender.recvTxChan) == 0 {
 
-		for tx := range sigChan {
-			count++
-			sender.recvTxChan <- tx
-			if count >= sender.repeat {
-				//fmt.Println("waitSignBurnTxATV2++++++++++++2")
-				for i := 0; i < sender.proceeNum; i++ {
-					runChan <- true
+			for tx := range sigChan {
+				count++
+				sender.recvTxChan <- tx
+				if count >= sender.repeat {
+					for i := 0; i < sender.proceeNum; i++ {
+						runChan <- true
+					}
+
+					count = 0
+					break
+
 				}
 
-				count = 0
-				//if len(sender.recvTxChan) == 0 {
-				//					continue
-				//				}
-
 			}
-
 		}
 
 	}
-	//time.Sleep(1 * time.Second)
 
+}
+func waitSendBurnTxATV2(sender *burnSender) {
+
+	if sender.proceeNum == 0 {
+		panic("must set proceeNum")
+	}
+	for i := 0; i < sender.proceeNum; i++ {
+		go func(index int) {
+			for {
+				client, err := ethclient.Dial(sender.nodeUrl)
+				if err != nil {
+					fmt.Println(err)
+					panic(err)
+				}
+				<-runChan
+			out:
+				for {
+
+					select {
+
+					case tx := <-sender.recvTxChan:
+						err := client.SendTransaction(context.Background(), tx)
+						if err != nil {
+							//signer := types.NewEIP155Signer(tx.ChainId())
+							//from, _ := types.Sender(signer, tx)
+							//fmt.Println("Failed to sendTxAT with err:", err, "will retry...:", from)
+
+							//nMutex.Lock()
+							//_, _ = revokeNonce(from)
+							//nMutex.Unlock()
+							atomic.AddInt64(&sender.sendErrTxNum, 1)
+							continue
+						}
+						atomic.AddInt64(&sender.sendTxNum, 1)
+						if sender.view {
+							fmt.Println("send tx at:", tx.Hash().Hex(), "processNum:", index, "tx.Nonce:", tx.Nonce())
+						}
+
+					default:
+						//fmt.Println("waitSendBurnTxATV2 recvTxChan:", len(sender.recvTxChan))
+						if len(sender.recvTxChan) == 0 {
+							break out
+						}
+
+					}
+				}
+
+			}
+		}(i)
+	}
 }

@@ -57,7 +57,7 @@ func signTxAT(masterKey *bip32.Key, sender *multiSender, signChan chan *types.Tr
 	}
 }
 
-var runChan = make(chan bool)
+var runChan = make(chan bool, 5)
 
 func waitSignTxAT(signChan chan *types.Transaction, sender *multiSender) {
 	for {
@@ -68,10 +68,7 @@ func waitSignTxAT(signChan chan *types.Transaction, sender *multiSender) {
 					sender.cycle++
 					//send signal for mutisend
 					//每间隔20000 笔交易就发送信号批量集中发送达到压测的目的
-					for i := 0; i < sender.proceeNum; i++ {
-						runChan <- true
-
-					}
+					runChan <- true
 					break
 				}
 			}
@@ -168,7 +165,8 @@ func transferAT(cmd *cobra.Command, args []string) {
 	go waitSendTxAT(mSender)
 	processStart := time.Now()
 	for {
-		fmt.Println("signChan capacity", len(signChan), "recvTxChan capacity", len(mSender.recvTxChan), "total send tx:", mSender.sendTxNum, "cycle times:", mSender.cycle, "cost time:", time.Since(processStart))
+		fmt.Println("signChan capacity", len(signChan), "recvTxChan capacity", len(mSender.recvTxChan), "runChan:", len(runChan),
+			"total send tx:", mSender.sendTxNum, "cycle times:", mSender.cycle, "cost time:", time.Since(processStart))
 		time.Sleep(time.Second)
 	}
 
