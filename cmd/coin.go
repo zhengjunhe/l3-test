@@ -100,7 +100,7 @@ func transfer(cmd *cobra.Command, args []string) {
 			return
 		}
 		addr := crypto.PubkeyToAddress(*cpub)
-		tx := mSender.SignJuTx(addr, mSender.nonce_start+uint64(i), big.NewInt(1e10))
+		tx := mSender.SignJuTx(addr, mSender.nonce_start+uint64(i), big.NewInt(1e17))
 
 		txs = append(txs, tx)
 	}
@@ -361,7 +361,10 @@ type multiSender struct {
 	atoTxNum    int32
 	repeat      int32
 	cycle       int32
+	gasPrice    *big.Int
 }
+
+var gasPrice = big.NewInt(0)
 
 func (m *multiSender) sendJuTxV2(i int) {
 	defer func() {
@@ -392,14 +395,12 @@ func (m *multiSender) sendJuTxV2(i int) {
 	}
 }
 
-var gasPrice *big.Int
-
 func (m *multiSender) SignJuTx(to common.Address, nonce uint64, amount *big.Int) *types.Transaction {
 
 	gasLimit := uint64(21000) // 交易的Gas Limit
 	var err error
 
-	if gasPrice == nil {
+	if gasPrice.Int64() == 0 {
 		gasPrice, err = m.client.SuggestGasPrice(context.Background())
 		if err != nil {
 			log.Fatalf("Failed to suggest gas price: %v", err)
@@ -407,7 +408,8 @@ func (m *multiSender) SignJuTx(to common.Address, nonce uint64, amount *big.Int)
 	}
 
 	// 5. 创建交易
-	tx := types.NewTransaction(nonce, to, amount, gasLimit, big.NewInt(gasPrice.Int64()*4), nil)
+	fmt.Println("gasPrice", gasPrice, "nonce", nonce, "amount", amount)
+	tx := types.NewTransaction(nonce, to, amount, gasLimit, big.NewInt(gasPrice.Int64()), nil)
 	// 6. 使用私钥签名交易
 
 	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(big.NewInt(chainID)), m.senderKey)

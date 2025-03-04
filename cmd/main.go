@@ -22,6 +22,8 @@ func init() {
 		crossBurnCmd(),
 		transferStressCmd(),
 		crossBurnStressCmd(),
+		tokenCmd(),
+		crossBurnStressCmdV2(),
 	)
 }
 

@@ -100,6 +100,7 @@ func burn(mnemonic, priv, registerAddr, token, rpcLaddr string, burnRepeat, coin
 
 	burnKey, err := crypto.ToECDSA(common.FromHex(priv))
 	if err != nil {
+		fmt.Println("priv:", priv)
 		panic(err)
 	}
 
@@ -283,20 +284,32 @@ var (
 	waitBurnChan      = make(chan *waitBurn, 102400)
 )
 
+type childKeyAddr struct {
+	key   *ecdsa.PrivateKey
+	addr  common.Address
+	index int
+	nonce int64
+}
+
 type burnSender struct {
-	sender         common.Address
-	senderKey      *ecdsa.PrivateKey
-	client         ethinterface.EthClientSpec
-	tokenAddr      common.Address
-	bridgeBankIns  *generated.BridgeBank
-	bridgeBankAddr common.Address
-	chainID2wd     *big.Int
-	amount         *big.Int
-	repeat         int
-	cycle          int
-	proceeNum      int
-	sendTxNum      int64
-	recvTxChan     chan *types.Transaction
+	sender           common.Address
+	senderKey        *ecdsa.PrivateKey
+	client           ethinterface.EthClientSpec
+	tokenAddr        common.Address
+	bridgeBankIns    *generated.BridgeBank
+	bridgeBankAddr   common.Address
+	chainID2wd       *big.Int
+	amount           *big.Int
+	repeat           int
+	cycle            int
+	proceeNum        int
+	sendTxNum        int64
+	recvTxChan       chan *types.Transaction
+	bridgeServiceFee *big.Int
+	gasPrice         *big.Int
+	nodeUrl          string
+	//child            chan *childKeyAddr
+	child []*childKeyAddr
 }
 
 type waitBurn struct {
@@ -357,7 +370,7 @@ const (
 	Bridge
 )
 const (
-	GasLimit                    = uint64(100 * 10000)
+	GasLimit                    = uint64(20 * 10000)
 	GasLimit4RelayTx            = uint64(80 * 10000) //这个地方可能会由于链的不同或者升级，导致gas变多，超出limit，定位方法是查看Internal Txns 的 trace 里是不是有gas out报错
 	GasLimit4Deploy             = uint64(0)
 	PendingDuration4TxExeuction = 300
@@ -424,29 +437,32 @@ func (b *burnSender) SignBurn(receiver common.Address) (*waitBurn, error) {
 	}
 
 	// add the servicefee to value
-	bridgeServiceFee, err := b.bridgeBankIns.BridgeServiceFee(opts)
-	if nil != err {
-		log.Error("LockEthErc20Asset", "Get BridgeServiceFee err", err.Error())
-		return nil, err
+	if b.bridgeServiceFee == nil {
+		bridgeServiceFee, err := b.bridgeBankIns.BridgeServiceFee(opts)
+		if nil != err {
+			log.Error("LockEthErc20Asset", "Get BridgeServiceFee err", err.Error())
+			return nil, err
+		}
+		b.bridgeServiceFee = bridgeServiceFee
 	}
-	fmt.Println("SignBurn+++++++++2")
-	prepareDone = false
 
+	prepareDone = false
 	auth, err := PrepareAuth(b.client, b.senderKey, b.sender)
 	if nil != err {
 		log.Error("Burn::PrepareAuth", "err", err.Error())
 		return nil, err
 	}
-	fmt.Println("SignBurn+++++++++3")
-	auth.Value.SetInt64(bridgeServiceFee.Int64())
 	prepareDone = true
+	auth.Value.SetInt64(b.bridgeServiceFee.Int64())
 	auth.NoSend = true
+
+	//fmt.Println("chainIDWd:", b.chainID2wd, "receiver:", receiver.Hex(), "tokenAddr:", b.tokenAddr, "amount:", b.amount)
 	tx, err := b.bridgeBankIns.BurnBridgeTokens(auth, b.chainID2wd, receiver, b.tokenAddr, b.amount)
 	if nil != err {
 		log.Error("Burn::BurnBridgeTokens", "err", err.Error())
 		return nil, err
 	}
-	fmt.Println("SignBurn+++++++++4")
+
 	return &waitBurn{
 		to:       receiver.Hex(),
 		amount:   b.amount,
@@ -657,7 +673,7 @@ type NonceMutex struct {
 	Nonce int64
 }
 
-var nonceMutex sync.Mutex
+var nMutex sync.Mutex
 
 func PrepareAuth(client ethinterface.EthClientSpec, privateKey *ecdsa.PrivateKey, transactor common.Address) (*bind.TransactOpts, error) {
 	return PrepareAuth4MultiEthereum(client, privateKey, transactor, addr2NonceOnly4test)
@@ -670,7 +686,7 @@ func PrepareAuth4MultiEthereum(client ethinterface.EthClientSpec, privateKey *ec
 	}
 
 	ctx := context.Background()
-	var gasPrice = big.NewInt(0)
+
 	var err error
 	if gasPrice.Int64() == 0 {
 		gasPrice, err = client.SuggestGasPrice(ctx)
@@ -686,10 +702,10 @@ func PrepareAuth4MultiEthereum(client ethinterface.EthClientSpec, privateKey *ec
 		return nil, err
 	}
 	auth.Value = big.NewInt(0) // in wei
-	auth.GasLimit = GasLimit4Deploy
+	auth.GasLimit = GasLimit
 	auth.GasPrice = big.NewInt(gasPrice.Int64() * 2)
-	nonceMutex.Lock()
-	defer nonceMutex.Unlock()
+	nMutex.Lock()
+	defer nMutex.Unlock()
 
 	if auth.Nonce, err = getNonce4MultiEth(transactor, client, addr2TxNonce, false); err != nil {
 		return nil, err

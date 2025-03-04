@@ -6,6 +6,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/spf13/cobra"
 	"github.com/tyler-smith/go-bip32"
 	"github.com/tyler-smith/go-bip39"
@@ -49,7 +50,7 @@ func burnTokenAT(cmd *cobra.Command, args []string) {
 	token, _ := cmd.Flags().GetString("token")
 	registerAddr, _ := cmd.Flags().GetString("registerAddr")
 	repeat, _ := cmd.Flags().GetInt("repeat")
-	chainID, err := cmd.Flags().GetInt("chainID")
+	chainIDWd, err := cmd.Flags().GetInt("chainID")
 	key, err := cmd.Flags().GetString("key")
 	if err != nil {
 		panic(err)
@@ -89,10 +90,11 @@ func burnTokenAT(cmd *cobra.Command, args []string) {
 		bridgeBankAddr: x2EthDeployInfo.BridgeBank.Address,
 		tokenAddr:      common.HexToAddress(token),
 		amount:         big.NewInt(1),
-		chainID2wd:     big.NewInt(int64(chainID)),
+		chainID2wd:     big.NewInt(int64(chainIDWd)),
 		repeat:         repeat,
 		recvTxChan:     make(chan *types.Transaction, 20000),
 		proceeNum:      50,
+		nodeUrl:        rpcLaddr,
 	}
 	addr2NonceOnly4test[bSender.sender] = &NonceMutex{int64(burnSenderNonce) - 1}
 	_, err = bSender.Approve(ToWei(amount, d), int64(burnSenderNonce))
@@ -120,50 +122,47 @@ func burnTokenAT(cmd *cobra.Command, args []string) {
 }
 
 func signBurnTxAT(masterKey *bip32.Key, sender *burnSender, sigChan chan *types.Transaction) {
-	numCPUs := runtime.NumCPU()
+
 	var count int64
-	for {
-		for i := 0; i < numCPUs; i++ {
-			go func(cpuCore int) {
-				for {
+	numCPUs := runtime.NumCPU()
+	for i := 0; i < numCPUs; i++ {
+		go func(cpuCore int) {
+			for {
 
-					bkey, err := newKeyFromMasterKey(masterKey, TypeEther, bip32.FirstHardenedChild, 0, uint32(atomic.AddInt64(&count, 1)))
-					if err != nil {
-						fmt.Println("Failed to newKeyFromMasterKey with err:", err)
-						panic(err)
-					}
-
-					cpub, err := crypto.DecompressPubkey(bkey.PublicKey().Key)
-					if err != nil {
-						fmt.Println("Failed to DecompressPubkey with err:", err)
-						panic(err)
-					}
-
-					addr := crypto.PubkeyToAddress(*cpub)
-					signedTx, err := sender.SignBurn(addr)
-					if err != nil {
-						fmt.Println("Burn err", err)
-						return
-					}
-					fmt.Println("+++++++++4")
-					fmt.Println("sign tx success cpuCore:", cpuCore)
-					sigChan <- signedTx.tx
+				bkey, err := newKeyFromMasterKey(masterKey, TypeEther, bip32.FirstHardenedChild, 0, uint32(atomic.AddInt64(&count, 1)))
+				if err != nil {
+					fmt.Println("Failed to newKeyFromMasterKey with err:", err)
+					panic(err)
 				}
-			}(i)
-		}
 
+				cpub, err := crypto.DecompressPubkey(bkey.PublicKey().Key)
+				if err != nil {
+					fmt.Println("Failed to DecompressPubkey with err:", err)
+					panic(err)
+				}
+
+				addr := crypto.PubkeyToAddress(*cpub)
+				signedTx, err := sender.SignBurn(addr)
+				if err != nil {
+					fmt.Println("Burn err", err)
+					return
+				}
+
+				sigChan <- signedTx.tx
+			}
+		}(i)
 	}
+
 }
 
 func waitSignBurnTxAT(sigChan chan *types.Transaction, sender *burnSender) {
 	for {
-		if len(sigChan) > sender.repeat {
+		if len(sigChan) >= sender.repeat {
 			for tx := range sigChan {
 				sender.recvTxChan <- tx
 				if len(sender.recvTxChan) == sender.repeat {
-					sender.cycle++
 					//send signal for mutisend
-					//每间隔20000 笔交易就发送信号批量集中发送达到压测的目的
+					//每间隔3000笔交易就发送信号批量集中发送达到压测的目的
 					for i := 0; i < sender.proceeNum; i++ {
 						runChan <- true
 
@@ -172,6 +171,7 @@ func waitSignBurnTxAT(sigChan chan *types.Transaction, sender *burnSender) {
 				}
 			}
 		}
+
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -186,16 +186,27 @@ func waitSendBurnTxAT(sender *burnSender) {
 			for {
 
 				<-runChan
+				client, err := ethclient.Dial(sender.nodeUrl)
+				if err != nil {
+					fmt.Println(err)
+					panic(err)
+				}
+
 				for {
 					tx, ok := <-sender.recvTxChan
 					if ok {
-						err := sender.client.SendTransaction(context.Background(), tx)
+						err := client.SendTransaction(context.Background(), tx)
 						if err != nil {
 							fmt.Println("Failed to sendTxAT with err:", err, "will retry...")
-							err = sender.client.SendTransaction(context.Background(), tx)
-							if err != nil {
-								fmt.Println("Failed to sendTxAT with err:", err)
-							}
+							//var tryTimes int
+							//for i := 0; i < tryTimes; i++ {
+							//	client, _ = ethclient.Dial(sender.nodeUrl)
+							//	err = client.SendTransaction(context.Background(), tx)
+							//	if err == nil {
+							//		break
+							//	}
+							//}
+
 						}
 						atomic.AddInt64(&sender.sendTxNum, 1)
 						if len(sender.recvTxChan) == 0 {
@@ -203,8 +214,6 @@ func waitSendBurnTxAT(sender *burnSender) {
 						}
 						fmt.Println("send tx at:", tx.Hash().Hex(), "processNum:", index, "tx.Nonce:", tx.Nonce())
 
-					} else {
-						return
 					}
 				}
 
