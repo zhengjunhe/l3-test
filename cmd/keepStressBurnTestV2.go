@@ -317,13 +317,14 @@ func waitSendBurnTxATV2(sender *burnSender) {
 					case tx := <-sender.recvTxChan:
 						err := client.SendTransaction(context.Background(), tx)
 						if err != nil {
-							//signer := types.NewEIP155Signer(tx.ChainId())
-							//from, _ := types.Sender(signer, tx)
-							//fmt.Println("Failed to sendTxAT with err:", err, "will retry...:", from)
+							signer := types.NewEIP155Signer(tx.ChainId())
+							from, _ := types.Sender(signer, tx)
+							fmt.Println("Failed to sendTxAT with err:", err, "will retry...:", from)
 
-							//nMutex.Lock()
+							nMutex.Lock()
+							delete(addr2NonceOnly4test, from)
 							//_, _ = revokeNonce(from)
-							//nMutex.Unlock()
+							nMutex.Unlock()
 							atomic.AddInt64(&sender.sendErrTxNum, 1)
 							continue
 						}
