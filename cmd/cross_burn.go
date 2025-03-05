@@ -642,7 +642,7 @@ func waitEthTxFinished(client ethinterface.EthClientSpec, txhash common.Hash, tx
 			log.Info(txName, "tx", "eth tx timeout")
 			return errors.New("eth tx timeout")
 		case <-oneSecondtimeout.C:
-			_, err := client.TransactionReceipt(context.Background(), txhash)
+			receipt, err := client.TransactionReceipt(context.Background(), txhash)
 			if err == ethereum.NotFound {
 				continue
 			} else if err != nil {
@@ -656,7 +656,7 @@ func waitEthTxFinished(client ethinterface.EthClientSpec, txhash common.Hash, tx
 				}
 				return err
 			}
-			log.Info(txName, "Finished executing for tx", txhash.String())
+			log.Info(txName, "Finished executing for tx", txhash.String(), "block height", receipt.BlockNumber.Int64())
 			return nil
 		}
 	}
