@@ -262,16 +262,22 @@ func SignBurn(bSender *burnSender, senderAddr common.Address, signKey *ecdsa.Pri
 }
 
 func waitSignBurnTxATV2(sigChan chan *types.Transaction, sender *burnSender) {
+	var startRecord time.Time
+	var sendCost time.Duration
 	for {
-		//fmt.Println("len(sigChan):", len(sigChan), "sender.repeat", sender.repeat, "recvchan len", len(sender.recvTxChan))
-		//time.Sleep(time.Millisecond * 300)
 		var count int
 		if len(sender.recvTxChan) == 0 {
-
+			if !startRecord.IsZero() { //控制发送速度
+				sendCost = time.Now().Sub(startRecord)
+				if sendCost < time.Millisecond*800 {
+					continue
+				}
+			}
 			for tx := range sigChan {
 				count++
 				sender.recvTxChan <- tx
 				if count >= sender.repeat {
+					startRecord = time.Now()
 					for i := 0; i < sender.proceeNum; i++ {
 						runChan <- true
 					}
@@ -294,12 +300,14 @@ func waitSendBurnTxATV2(sender *burnSender) {
 	}
 	for i := 0; i < sender.proceeNum; i++ {
 		go func(index int) {
+			client, err := ethclient.Dial(sender.nodeUrl)
+			if err != nil {
+				fmt.Println(err)
+				panic(err)
+			}
+
 			for {
-				client, err := ethclient.Dial(sender.nodeUrl)
-				if err != nil {
-					fmt.Println(err)
-					panic(err)
-				}
+
 				<-runChan
 			out:
 				for {
