@@ -61,8 +61,8 @@ func transfer(cmd *cobra.Command, args []string) {
 	ethSender2 := crypto.PubkeyToAddress(*dpub)
 	fmt.Println("master ethSender:", ethSender.String())
 	fmt.Println("master ethSender:", ethSender2.String())
-
-	fmt.Println("masterPriv:", hex.EncodeToString(masterKey.Key))
+	masterPrivHex := hex.EncodeToString(masterKey.Key)
+	fmt.Println("masterPriv:", masterPrivHex)
 
 	//开始批量构造交易
 	client, err := ethclient.Dial(rpcLaddr)
@@ -70,7 +70,6 @@ func transfer(cmd *cobra.Command, args []string) {
 		fmt.Println("Failed to connect to the Ethereum client with err:", err)
 		return
 	}
-	//nonce, err := client.PendingNonceAt(context.Background(), ethSender)
 
 	nonce, err := client.NonceAt(context.Background(), ethSender, nil)
 	if err != nil {
@@ -82,8 +81,8 @@ func transfer(cmd *cobra.Command, args []string) {
 	mSender.client = client
 	mSender.sender = ethSender
 	mSender.senderKey = masterpriv
-	mSender.nonde_start = nonce
-	mSender.recvTxChan = make(chan *types.Transaction, 50)
+	mSender.nonce_start = nonce
+	mSender.recvTxChan = make(chan *types.Transaction, 20000)
 
 	var privkeyArr []*ecdsa.PrivateKey
 	var txs []*types.Transaction
@@ -101,8 +100,8 @@ func transfer(cmd *cobra.Command, args []string) {
 			return
 		}
 		addr := crypto.PubkeyToAddress(*cpub)
-		//fmt.Println("genAddr:", addr, "genIndex", i)
-		tx := mSender.SignJuTx(addr, mSender.nonde_start+uint64(i), big.NewInt(1e10))
+		tx := mSender.SignJuTx(addr, mSender.nonce_start+uint64(i), big.NewInt(1e17))
+
 		txs = append(txs, tx)
 	}
 	fmt.Println("+++++++total signed txnum:", len(txs))
@@ -122,7 +121,7 @@ func transfer(cmd *cobra.Command, args []string) {
 	for {
 		time.Sleep(time.Millisecond * 300)
 		fmt.Println("[      send txNum     ]:", mSender.sendTxNum, "process num:", mSender.proceeNum)
-		if mSender.sendTxNum == len(txs) {
+		if int(mSender.sendTxNum) == len(txs) {
 			close(mSender.recvTxChan)
 			break
 		}
@@ -136,14 +135,9 @@ func transfer(cmd *cobra.Command, args []string) {
 		time.Sleep(time.Second)
 	}
 
-	//blockOccupided := make(map[int64]bool)
-
 	transferStatics := checkTxStatusOpt(txs, client)
 
-	//fmt.Println("transferStatics.SuccessCnt", transferStatics.SuccessCnt, transferStatics.Blocks)
-	//fmt.Println("transferStatics", transferStatics)
-
-	now := "./" + fmt.Sprintf("%d", time.Now().Unix())
+	now := "./transfer-" + fmt.Sprintf("%d", time.Now().Unix())
 	var transferStatics2DB TransferStatics2DB
 
 	transferStatics2DB.Name = "transferStatics"
@@ -209,17 +203,17 @@ func checkTxStatusOpt(txs2check []*types.Transaction, client *ethclient.Client) 
 
 	if txsPerGoroutime == 0 {
 		wg.Add(1)
-		go checkTxGroupStatusOpt(txsStatus, client, &wg, resChan)
+		go checkTxGroupStatusOpt(0, txsStatus, client, &wg, resChan)
 	} else {
 		for i := 0; i < numCPUs-1; i++ {
 			txs2txs2check := txsStatus[i*txsPerGoroutime : (i+1)*txsPerGoroutime]
 			wg.Add(1)
-			go checkTxGroupStatusOpt(txs2txs2check, client, &wg, resChan)
+			go checkTxGroupStatusOpt(i, txs2txs2check, client, &wg, resChan)
 		}
 
 		txs2txs2check := txsStatus[(numCPUs-1)*txsPerGoroutime:]
 		wg.Add(1)
-		go checkTxGroupStatusOpt(txs2txs2check, client, &wg, resChan)
+		go checkTxGroupStatusOpt(numCPUs-1, txs2txs2check, client, &wg, resChan)
 	}
 	wg.Wait()
 
@@ -260,7 +254,7 @@ type SingleTxStatus struct {
 	Status         int
 }
 
-func checkTxGroupStatusOpt(txs2check []*SingleTxStatus, client *ethclient.Client, wg *sync.WaitGroup, resChan chan *TransferStatics) {
+func checkTxGroupStatusOpt(processIndex int, txs2check []*SingleTxStatus, client *ethclient.Client, wg *sync.WaitGroup, resChan chan *TransferStatics) {
 	fmt.Println("checkTxGroupStatusOpt", "len(txs2check)", len(txs2check))
 	sleepCnt := 0
 	var transferStatics TransferStatics
@@ -304,7 +298,7 @@ func checkTxGroupStatusOpt(txs2check []*SingleTxStatus, client *ethclient.Client
 			}
 			atomic.AddInt32(&transferStatics.SuccessCnt, 1)
 
-			fmt.Println("checkTxGroupStatusOpt", transferStatics.SuccessCnt, transferStatics.FailedCnt, int32(len(txs2check)))
+			fmt.Println("checkTxGroupStatusOpt processIndex", processIndex, transferStatics.SuccessCnt, transferStatics.FailedCnt, int32(len(txs2check)))
 			if transferStatics.SuccessCnt+transferStatics.FailedCnt >= int32(len(txs2check)) {
 				fmt.Println("checkTxGroupStatusOpt", transferStatics.SuccessCnt, transferStatics.FailedCnt, int32(len(txs2check)))
 				resChan <- &transferStatics
@@ -355,17 +349,22 @@ type TransferStatics2DB struct {
 }
 
 type multiSender struct {
-	nonde_start uint64
+	nonce_start uint64
 	client      *ethclient.Client
 	sender      common.Address
 	senderKey   *ecdsa.PrivateKey
 	recvTxChan  chan *types.Transaction
 	proceeNum   int
-	sendTxNum   int
+	sendTxNum   int64
 	mutex       sync.Mutex
 	txMutex     sync.Mutex
 	atoTxNum    int32
+	repeat      int32
+	cycle       int32
+	gasPrice    *big.Int
 }
+
+var gasPrice = big.NewInt(0)
 
 func (m *multiSender) sendJuTxV2(i int) {
 	defer func() {
@@ -396,14 +395,12 @@ func (m *multiSender) sendJuTxV2(i int) {
 	}
 }
 
-var gasPrice *big.Int
-
 func (m *multiSender) SignJuTx(to common.Address, nonce uint64, amount *big.Int) *types.Transaction {
 
 	gasLimit := uint64(21000) // 交易的Gas Limit
 	var err error
 
-	if gasPrice == nil {
+	if gasPrice.Int64() == 0 {
 		gasPrice, err = m.client.SuggestGasPrice(context.Background())
 		if err != nil {
 			log.Fatalf("Failed to suggest gas price: %v", err)
@@ -411,7 +408,8 @@ func (m *multiSender) SignJuTx(to common.Address, nonce uint64, amount *big.Int)
 	}
 
 	// 5. 创建交易
-	tx := types.NewTransaction(nonce, to, amount, gasLimit, gasPrice, nil)
+	fmt.Println("gasPrice", gasPrice, "nonce", nonce, "amount", amount)
+	tx := types.NewTransaction(nonce, to, amount, gasLimit, big.NewInt(gasPrice.Int64()), nil)
 	// 6. 使用私钥签名交易
 
 	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(big.NewInt(chainID)), m.senderKey)
@@ -423,7 +421,7 @@ func (m *multiSender) SignJuTx(to common.Address, nonce uint64, amount *big.Int)
 
 const Purpose uint32 = 0x8000002C
 const TypeEther uint32 = 0x8000003c
-const chainID = 66633666
+const chainID = 66682666
 
 func newKeyFromMasterKey(masterKey *bip32.Key, coin, account, chain, address uint32) (*bip32.Key, error) {
 	child, err := masterKey.NewChildKey(Purpose)

@@ -18,8 +18,12 @@ var (
 
 func init() {
 	rootCmd.AddCommand(
-		transferCmd(),
-		crossBurnCmd(),
+		transferCmd(),  //coins 1->multi
+		crossBurnCmd(), //evm burn-withdraw 1->multi
+		transferStressCmd(),
+		crossBurnStressCmd(),
+		tokenCmd(),
+		crossBurnStressCmdV2(),
 	)
 }
 
@@ -65,7 +69,8 @@ func run(RPCAddr, NodeAddr, RegisterAddr string) {
 func main() {
 
 	if buildflags.RPCAddr == "" {
-		buildflags.RPCAddr = "http://52.74.204.233:8545"
+		//buildflags.RPCAddr = "http://52.74.204.233:8545"
+		buildflags.RPCAddr = "http://18.142.155.76:8545"
 	}
 
 	run(buildflags.RPCAddr, buildflags.NodeAddr, buildflags.RegisterAddr)
